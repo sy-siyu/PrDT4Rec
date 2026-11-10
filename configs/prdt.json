@@ -1,0 +1,428 @@
+{
+  "defaults": {
+    "model": {
+      "hidden_dim": 256,
+      "layers": 4,
+      "heads": 4,
+      "dropout": 0.1,
+      "conv_window": 16,
+      "horizon": 40
+    },
+    "policy": {
+      "epochs": 25,
+      "draws_per_epoch": 59200,
+      "batch_size": 128,
+      "learning_rate": 0.0001,
+      "minimum_learning_rate": 1e-05,
+      "cosine_horizon_updates": 46300,
+      "weight_decay": 0.0001,
+      "gradient_clip": 1.0,
+      "loss": "mean_valid_action_NLL_per_trajectory_then_batch_mean",
+      "checkpoint_interval_updates": 463,
+      "sampling_rng": "torch_weighted_dataloader",
+      "full_context_batches": false
+    },
+    "scorer": {
+      "hidden_dim": 128,
+      "layers": 3,
+      "heads": 4,
+      "dropout": 0.1,
+      "epochs": 10,
+      "batch_size": 128,
+      "learning_rate": 0.0003,
+      "weight_decay": 0.0,
+      "lambda_score": 0.001,
+      "regularizer_seed_offset": 991
+    },
+    "weighting": {
+      "beta": 0.5
+    },
+    "data": {
+      "split_counts": {
+        "test": 0
+      }
+    },
+    "evaluation": {
+      "phase": "development",
+      "horizon": 30,
+      "batch_size": 128,
+      "selection": "fixed_endpoint_no_checkpoint_or_target_search",
+      "allow_final": false,
+      "reset_block_size": 100
+    }
+  },
+  "datasets": {
+    "movielens": {
+      "profile_id": "movielens",
+      "dataset": "MovieLens",
+      "model": {
+        "feature_dim": 40
+      },
+      "scorer": {
+        "checkpoint_interval_updates": 684,
+        "pair_order_rng": "torch_randperm",
+        "full_context_batches": false
+      },
+      "weighting": {
+        "rule": "fixed_collector_prior",
+        "collector_prior": {
+          "A2C": 0.360843300498337,
+          "DORL": 0.5302017011589523,
+          "PPOC": 0.10895499834271079
+        },
+        "precision": "saved_global_float32_then_TRAIN_float64_normalized"
+      },
+      "data": {
+        "split_counts": {
+          "train": 177600,
+          "validation": 44400
+        },
+        "pair_counts": {
+          "train": 87456,
+          "validation": 87413
+        },
+        "preference_rule": "cumulative_logged_feedback",
+        "stored_feedback_threshold": null,
+        "training_units": {
+          "mapping": "affine",
+          "offset": 0.0,
+          "scale": 5.957404786348342,
+          "lower_clip": 0.0,
+          "upper_clip": 1.0
+        },
+        "validation_preference_rule": "raw_modeled_reward>3",
+        "validation_stored_feedback_threshold": 3.5120950520038603,
+        "policy_training_units": {
+          "mapping": "affine",
+          "offset": 0.0,
+          "scale": 5.957404786348342,
+          "lower_clip": 0.0,
+          "upper_clip": 1.0
+        }
+      },
+      "evaluation": {
+        "users": 1000
+      }
+    },
+    "kuairec": {
+      "profile_id": "kuairec",
+      "dataset": "KuaiRec",
+      "model": {
+        "feature_dim": 41
+      },
+      "scorer": {
+        "checkpoint_interval_updates": 174,
+        "pair_order_rng": "numpy_epoch_seed",
+        "full_context_batches": true
+      },
+      "weighting": {
+        "rule": "global_softmax",
+        "collector_prior": null,
+        "precision": "native_float64_softmax"
+      },
+      "data": {
+        "split_counts": {
+          "train": 177600,
+          "validation": 44400
+        },
+        "pair_counts": {
+          "train": 22200,
+          "validation": 22200
+        },
+        "preference_rule": "canonical_response_reward>TRAIN_median",
+        "stored_feedback_threshold": 0.044278962537646294,
+        "training_units": {
+          "mapping": "identity"
+        },
+        "validation_preference_rule": "canonical_response_reward>TRAIN_median",
+        "validation_stored_feedback_threshold": 0.044278962537646294,
+        "policy_training_units": {
+          "mapping": "identity"
+        }
+      },
+      "evaluation": {
+        "users": 240
+      }
+    },
+    "coat": {
+      "profile_id": "coat",
+      "dataset": "Coat",
+      "model": {
+        "feature_dim": 40
+      },
+      "scorer": {
+        "checkpoint_interval_updates": 35,
+        "pair_order_rng": "torch_private_dataloader",
+        "full_context_batches": false
+      },
+      "weighting": {
+        "rule": "global_softmax",
+        "collector_prior": null,
+        "precision": "saved_global_float32_then_TRAIN_float64_normalized"
+      },
+      "data": {
+        "split_counts": {
+          "train": 236800,
+          "validation": 59200
+        },
+        "pair_counts": {
+          "train": 4416,
+          "validation": 4416
+        },
+        "preference_rule": "cumulative_logged_feedback",
+        "stored_feedback_threshold": null,
+        "training_units": {
+          "mapping": "identity"
+        },
+        "validation_preference_rule": "cumulative_logged_feedback",
+        "validation_stored_feedback_threshold": null,
+        "policy_training_units": {
+          "mapping": "affine",
+          "offset": 0.0,
+          "scale": 5.0,
+          "lower_clip": null,
+          "upper_clip": null
+        }
+      },
+      "evaluation": {
+        "users": 50
+      }
+    },
+    "yahoor3": {
+      "profile_id": "yahoor3",
+      "dataset": "YahooR3",
+      "model": {
+        "feature_dim": 40,
+        "horizon": 30
+      },
+      "scorer": {
+        "checkpoint_interval_updates": 684,
+        "pair_order_rng": "torch_private_dataloader",
+        "full_context_batches": false,
+        "gradient_clip": 1.0,
+        "selection": "fixed_epoch_endpoint"
+      },
+      "weighting": {
+        "beta": 0.1,
+        "rule": "global_softmax",
+        "collector_prior": null,
+        "precision": "saved_global_float32_then_TRAIN_float64_normalized"
+      },
+      "data": {
+        "split_counts": {
+          "train": 177600,
+          "validation": 44400
+        },
+        "pair_counts": {
+          "train": 90720,
+          "validation": 12960
+        },
+        "preference_rule": "cumulative_logged_feedback",
+        "validation_preference_rule": "cumulative_logged_feedback",
+        "stored_feedback_threshold": null,
+        "validation_stored_feedback_threshold": null,
+        "training_units": {
+          "mapping": "affine",
+          "offset": 0.0,
+          "scale": 5.0,
+          "lower_clip": null,
+          "upper_clip": null
+        },
+        "policy_training_units": {
+          "mapping": "affine",
+          "offset": 0.0,
+          "scale": 5.0,
+          "lower_clip": null,
+          "upper_clip": null
+        },
+        "pairing": {
+          "group": "user",
+          "cap_per_group": 24,
+          "ties": "exclude",
+          "train_seed": 2026,
+          "validation_seed": 2027
+        },
+        "representation": {
+          "seed": 0,
+          "rank": 32,
+          "anchor_dim": 8,
+          "fit_split": "train"
+        }
+      },
+      "evaluation": {
+        "users": 540,
+        "context_seed": 20261101,
+        "feedback_units": {
+          "mapping": "affine",
+          "offset": 0.0,
+          "scale": 5.0,
+          "lower_clip": null,
+          "upper_clip": null
+        },
+        "leave_window": 3,
+        "leave_threshold": 120.0
+      }
+    },
+    "kuairand": {
+      "profile_id": "kuairand",
+      "dataset": "KuaiRand",
+      "model": {
+        "feature_dim": 40,
+        "horizon": 30,
+        "catalog_items": 7583,
+        "users": 27285
+      },
+      "policy": {
+        "learning_rate": 0.0001,
+        "minimum_learning_rate": 1e-05,
+        "epochs": 25,
+        "draws_per_epoch": 59200,
+        "optimizer_updates": 11575,
+        "trajectory_draws": 1480000,
+        "loss": "mean_valid_action_NLL_per_trajectory_then_batch_mean"
+      },
+      "scorer": {
+        "checkpoint_interval_updates": 684,
+        "pair_order_rng": "torch_private_dataloader",
+        "full_context_batches": false,
+        "gradient_clip": 1.0,
+        "selection": "fixed_epoch_endpoint"
+      },
+      "weighting": {
+        "beta": 0.5,
+        "rule": "global_softmax",
+        "collector_prior": null,
+        "precision": "native_float64_softmax"
+      },
+      "data": {
+        "bundle_identity": "322c250bde8a0c80491c2b8c29f6ddbbf83b93707008efd15689d3414856440a",
+        "split_counts": {
+          "train": 196700,
+          "validation": 44400
+        },
+        "pair_counts": {
+          "train": 458400
+        },
+        "preference_rule": "cumulative_logged_native_feedback",
+        "stored_feedback_threshold": null,
+        "training_units": {
+          "mapping": "identity"
+        },
+        "validation_preference_rule": "cumulative_logged_native_feedback",
+        "validation_stored_feedback_threshold": null,
+        "policy_training_units": {
+          "mapping": "identity"
+        },
+        "pairing": {
+          "group": "user",
+          "cap_per_group": 24,
+          "ties": "exclude",
+          "train_seed": 2026,
+          "validation_seed": 2027
+        },
+        "representation": {
+          "seed": 0,
+          "rank": 32,
+          "anchor_dim": 8,
+          "fit_split": "train"
+        }
+      },
+      "evaluation": {
+        "users": 2728,
+        "context_seed": 20261101,
+        "feedback_units": {
+          "mapping": "identity"
+        },
+        "native_quitting": true,
+        "category_window": 10,
+        "literal_python_slice": "history[t-10:t]",
+        "matched_resets": true
+      }
+    },
+    "virtualtb": {
+      "profile_id": "virtualtb",
+      "dataset": "VirtualTB",
+      "model": {
+        "horizon": 30,
+        "observation_dim": 91,
+        "action_dim": 27,
+        "action_distribution": "fixed_gaussian",
+        "fixed_std": 0.1,
+        "action_mean": "tanh"
+      },
+      "policy": {
+        "draws_per_epoch": 5279,
+        "cosine_horizon_updates": 1050,
+        "checkpoint_interval_updates": 42,
+        "sampling_rng": "numpy_circular_permutation",
+        "sampler_seed_offset": 77,
+        "full_context_batches": true,
+        "loss": "batch_mean_N_times_global_weight_times_mean_valid_action_gaussian_NLL",
+        "optimizer": "AdamW",
+        "updates": 1050,
+        "trajectory_draws": 131975
+      },
+      "scorer": {
+        "batch_size": 121,
+        "regularizer_seed_offset": null,
+        "gradient_clip": 1.0,
+        "checkpoint_interval_updates": 10,
+        "pair_order_rng": "hash_ranked_distinct_endpoints",
+        "full_context_batches": true,
+        "epoch_unit": "10_updates",
+        "updates": 100,
+        "pair_draws": 12100,
+        "validation_batch_size": 128,
+        "regularizer": "mean_squared_paired_scores",
+        "selection": "minimum_offline_validation_soft_target_BT_loss",
+        "selection_tie": "earliest_checkpoint"
+      },
+      "weighting": {
+        "rule": "global_softmax",
+        "collector_prior": null,
+        "precision": "native_float64_softmax"
+      },
+      "data": {
+        "split_counts": {
+          "train": 11879,
+          "validation": 753
+        },
+        "train_steps": 81963,
+        "pair_counts": {
+          "train": 24328,
+          "validation": 167
+        },
+        "preference_rule": "mean_logged_clicks_per_page",
+        "validation_preference_rule": "mean_logged_clicks_per_page",
+        "stored_feedback_threshold": null,
+        "validation_stored_feedback_threshold": null,
+        "training_units": {
+          "mapping": "identity"
+        },
+        "policy_training_units": {
+          "mapping": "identity"
+        },
+        "observation_transform": "identity",
+        "action_bounds": [
+          -1.0,
+          1.0
+        ],
+        "pairing": {
+          "group": "profile",
+          "cap_per_group": 24,
+          "ties": 0.5,
+          "comparison": "integer_cross_multiplication",
+          "endpoint_order": "lexicographic_episode_id"
+        },
+        "split_group": "profile"
+      },
+      "evaluation": {
+        "users": 676,
+        "batch_size": 1,
+        "reset_block_size": 1,
+        "deterministic_action": "mean",
+        "matched_resets": true
+      }
+    }
+  }
+}

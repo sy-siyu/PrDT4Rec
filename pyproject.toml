@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "prdt4rec"
+version = "0.1.0"
+description = "Preference-weighted Decision ConvFormer for offline recommendation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = ["numpy>=1.26", "torch>=2.3"]
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+[project.scripts]
+prdt = "prdt4rec.__main__:main"
+[tool.setuptools.packages.find]
+include = ["prdt4rec*"]
+[tool.setuptools.data-files]
+"share/prdt4rec" = ["configs/prdt.json"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,86 @@
+{
+  "schema_version": "plain-prdt-config-v1",
+  "profile_id": "movielens_retained",
+  "registry_record_sha256": "63f5af449ad1cdc122e35b4b9d906b42b37d960bef842f147d5df05ead5a7e86",
+  "dataset": "MovieLens",
+  "status": "retained_verified_development",
+  "runnable": true,
+  "blocked_reason": null,
+  "model": {
+    "hidden_dim": 256,
+    "layers": 4,
+    "heads": 4,
+    "dropout": 0.1,
+    "conv_window": 16,
+    "feature_dim": 40,
+    "horizon": 40
+  },
+  "policy": {
+    "epochs": 25,
+    "draws_per_epoch": 59200,
+    "batch_size": 128,
+    "learning_rate": 0.0001,
+    "minimum_learning_rate": 1e-05,
+    "cosine_horizon_updates": 46300,
+    "weight_decay": 0.0001,
+    "gradient_clip": 1.0,
+    "loss": "mean_valid_action_NLL_per_trajectory_then_batch_mean",
+    "checkpoint_interval_updates": 463,
+    "sampling_rng": "torch_weighted_dataloader",
+    "full_context_batches": false
+  },
+  "scorer": {
+    "hidden_dim": 128,
+    "layers": 3,
+    "heads": 4,
+    "dropout": 0.1,
+    "epochs": 10,
+    "batch_size": 128,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.0,
+    "lambda_score": 0.001,
+    "regularizer_seed_offset": 991,
+    "checkpoint_interval_updates": 684,
+    "pair_order_rng": "torch_private_dataloader",
+    "full_context_batches": false
+  },
+  "weighting": {
+    "rule": "fixed_collector_prior",
+    "beta": 0.5,
+    "collector_prior": {
+      "A2C": 0.360843300498337,
+      "DORL": 0.5302017011589523,
+      "PPOC": 0.10895499834271079
+    },
+    "precision": "saved_global_float32_then_TRAIN_float64_normalized"
+  },
+  "data": {
+    "split_counts": {
+      "train": 177600,
+      "validation": 44400,
+      "test": 0
+    },
+    "pair_counts": {
+      "train": 87456,
+      "validation": 87413
+    },
+    "preference_rule": "raw_modeled_reward>3",
+    "stored_feedback_threshold": 3.5120950520038603,
+    "training_units": {
+      "mapping": "affine",
+      "offset": 0.0,
+      "scale": 5.957404786348342,
+      "lower_clip": 0.0,
+      "upper_clip": 1.0
+    }
+  },
+  "evaluation": {
+    "phase": "development",
+    "users": 1000,
+    "horizon": 40,
+    "batch_size": 128,
+    "selection": "fixed_endpoint_no_checkpoint_or_target_search",
+    "allow_final": false,
+    "reset_block_size": 100
+  }
+}
