@@ -33,6 +33,15 @@ def per_trajectory_categorical_nll(
     return token_nll.sum(dim=1)
 
 
+def per_trajectory_mean_action_nll(logits, actions, mask):
+    """Average categorical NLL over each trajectory's executed real actions."""
+    if mask.dtype != torch.bool:
+        raise ValueError("mean-action NLL requires the boolean valid-action mask")
+    summed = per_trajectory_categorical_nll(logits, actions, mask)
+    counts = (mask & (actions >= 2)).sum(dim=1).to(dtype=summed.dtype)
+    return summed / counts
+
+
 def bradley_terry_loss(preferred_scores: torch.Tensor, rejected_scores: torch.Tensor) -> torch.Tensor:
     return F.softplus(-(preferred_scores - rejected_scores)).mean()
 

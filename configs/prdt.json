@@ -1,6 +1,8 @@
 {
   "defaults": {
     "model": {
+      "input_type": "catalog",
+      "user_features": "projected",
       "hidden_dim": 256,
       "layers": 4,
       "heads": 4,
@@ -108,7 +110,9 @@
       "profile_id": "kuairec",
       "dataset": "KuaiRec",
       "model": {
-        "feature_dim": 41
+        "feature_dim": 41,
+        "user_features": "zero",
+        "catalog_items": 3327
       },
       "scorer": {
         "checkpoint_interval_updates": 174,
@@ -206,7 +210,7 @@
         "beta": 0.1,
         "rule": "global_softmax",
         "collector_prior": null,
-        "precision": "saved_global_float32_then_TRAIN_float64_normalized"
+        "precision": "saved_global_float32_then_TRAIN_numpy_float64_normalized"
       },
       "data": {
         "split_counts": {
@@ -251,6 +255,7 @@
       },
       "evaluation": {
         "users": 540,
+        "reset_block_size": 540,
         "context_seed": 20261101,
         "feedback_units": {
           "mapping": "affine",
@@ -292,7 +297,7 @@
         "beta": 0.5,
         "rule": "global_softmax",
         "collector_prior": null,
-        "precision": "native_float64_softmax"
+        "precision": "saved_global_float32_then_TRAIN_numpy_float64_normalized"
       },
       "data": {
         "bundle_identity": "322c250bde8a0c80491c2b8c29f6ddbbf83b93707008efd15689d3414856440a",
@@ -301,7 +306,8 @@
           "validation": 44400
         },
         "pair_counts": {
-          "train": 458400
+          "train": 458400,
+          "validation": 65472
         },
         "preference_rule": "cumulative_logged_native_feedback",
         "stored_feedback_threshold": null,
@@ -329,6 +335,7 @@
       },
       "evaluation": {
         "users": 2728,
+        "reset_block_size": 2728,
         "context_seed": 20261101,
         "feedback_units": {
           "mapping": "identity"
@@ -343,6 +350,8 @@
       "profile_id": "virtualtb",
       "dataset": "VirtualTB",
       "model": {
+        "input_type": "continuous",
+        "user_features": null,
         "horizon": 30,
         "observation_dim": 91,
         "action_dim": 27,
@@ -367,7 +376,9 @@
         "regularizer_seed_offset": null,
         "gradient_clip": 1.0,
         "checkpoint_interval_updates": 10,
-        "pair_order_rng": "hash_ranked_distinct_endpoints",
+        "pair_order_rng": "seed0_hash_ranked_then_seeded_permutation",
+        "pair_order_seed_offset": 1000,
+        "exposure_digest_domain": "virtualtb-h30-shared-expansion-v1-scorer-exposure",
         "full_context_batches": true,
         "epoch_unit": "10_updates",
         "updates": 100,
@@ -412,7 +423,8 @@
           "cap_per_group": 24,
           "ties": 0.5,
           "comparison": "integer_cross_multiplication",
-          "endpoint_order": "lexicographic_episode_id"
+          "endpoint_order": "lexicographic_episode_id",
+          "endpoint_selection_digest_domain": "virtualtb-h30-shared-expansion-v1-pair-endpoints"
         },
         "split_group": "profile"
       },
@@ -421,6 +433,7 @@
         "batch_size": 1,
         "reset_block_size": 1,
         "deterministic_action": "mean",
+        "reset_seed_domain": "virtualtb-h30-seed0-dev-v1",
         "matched_resets": true
       }
     }

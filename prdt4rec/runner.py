@@ -15,6 +15,18 @@ CONFIG_SCHEMA = "plain-prdt-config-v1"
 PUBLIC_SCHEMA = "plain-prdt-config-v2"
 BUNDLE_SCHEMA = "plain-prdt-bundle-v1"
 PROFILES_SCHEMA = "plain-prdt-profiles-v1"
+LOCK_NAME = ".plain.lock"
+# Executable sources of the initial three-profile release (commit 160b9ac).
+_INITIAL_RELEASE_SOURCES = {
+    "plain.py": "423a2f9a50a61539826cb6db87422f8ab61856b6d8fa787c32c9f882db8ffea0",
+    "plain_environments.py": "91cfc86ff25027f507f4117aeaabe4572f4e7d4dd625e4d2d8a10765c417c98e",
+    "data.py": "c1ca07f2239a56d608aff78ce93fd892a41092724b14fbc64cc969da2fa79304",
+    "models.py": "a3dfcff08a7fa5eed3b1fe7518565bd58a5aa7144d5ca504381cefc57cb5bbe5",
+    "training.py": "7dfd7d32110879b262b5811ae89c1eb77106133225df99b697ed8e9eecb8188d",
+    "objective.py": "8403f035c6141c2dd69fe143401a8654ba2b64350ea56ecde7edd840cf3eb88b",
+    "features.py": "d7e11a665b8f4faf89d550d7364f860cc70e613d40ebb3dac6967031128148db",
+    "loss.py": "f6720bde6dcca6cbe46ad7302170b535db68a692953dcf52c08be8bde57a03e5",
+}
 PROJECT = Path(__file__).resolve().parents[1]
 PUBLIC_CONFIG = PROJECT / "configs/prdt.json"
 if not PUBLIC_CONFIG.exists(): PUBLIC_CONFIG = Path(sysconfig.get_path("data")) / "share/prdt4rec/prdt.json"
@@ -81,7 +93,7 @@ def merge_settings(defaults, overrides):
 
 
 def dataset_settings(config_file=None):
-    """Resolve parameters for every dataset, including dedicated experiment runners."""
+    """Resolve the shared parameters and each dataset's overrides."""
     document = read(config_file or PUBLIC_CONFIG)
     if (set(document) - {"schema_version"} != {"defaults", "datasets"}
             or document.get("schema_version", PROFILES_SCHEMA) != PROFILES_SCHEMA
@@ -99,23 +111,18 @@ def dataset_settings(config_file=None):
     return profiles
 
 
-# These recipes currently execute through their dataset-specific experiment runners.
-DEDICATED_DATASETS = frozenset({"yahoor3", "virtualtb", "kuairand"})
+def _validate_public(config):
+    # Format metadata stays internal; preserve historical resolved identities.
+    config.setdefault("schema_version", PUBLIC_SCHEMA)
+    if config["schema_version"] != PUBLIC_SCHEMA:
+        raise ValueError("shared config requires the public profile format")
+    validate_config(config)
+    return config
 
 
 def public_profiles(config_file=None):
     """Return profiles supported by the prepared-bundle launcher."""
-    profiles = {}
-    for name, config in dataset_settings(config_file).items():
-        if name in DEDICATED_DATASETS:
-            continue
-        # Format metadata stays internal; preserve historical resolved identities.
-        config.setdefault("schema_version", PUBLIC_SCHEMA)
-        validate_config(config)
-        if config["schema_version"] != PUBLIC_SCHEMA:
-            raise ValueError("dataset key must match its public profile_id")
-        profiles[name] = config
-    return profiles
+    return {name: _validate_public(config) for name, config in dataset_settings(config_file).items()}
 
 
 def list_profiles(config_file=None):
@@ -127,22 +134,18 @@ def load_config(profile):
     name = str(profile)
     if "#" in name:
         config_file, dataset = name.rsplit("#", 1)
-        if dataset in DEDICATED_DATASETS:
-            raise ValueError(f"{dataset} uses its dedicated experiment runner; see docs/DATA.md")
-        profiles = public_profiles(config_file)
+        profiles = dataset_settings(config_file)
         if dataset not in profiles: raise ValueError(f"unknown dataset profile: {dataset}")
-        return profiles[dataset]
+        return _validate_public(profiles[dataset])
     source = Path(profile)
-    if name in DEDICATED_DATASETS:
-        raise ValueError(f"{name} uses its dedicated experiment runner; see docs/DATA.md")
     if not source.suffix and source.name == name:
-        profiles = public_profiles()
-        if name in profiles: return profiles[name]
+        profiles = dataset_settings()
+        if name in profiles: return _validate_public(profiles[name])
     path = source if source.suffix == ".json" else CONFIGS / f"{profile}.json"
     # Previously published per-dataset paths resolve to the same merged recipe.
     if not path.exists() and path.parent.resolve() == CONFIGS.resolve():
-        profiles = public_profiles()
-        if path.stem in profiles: return profiles[path.stem]
+        profiles = dataset_settings()
+        if path.stem in profiles: return _validate_public(profiles[path.stem])
     config = read(path)
     config.setdefault("schema_version", PUBLIC_SCHEMA)
     validate_config(config)
@@ -163,6 +166,10 @@ def validate_config(c):
         expected |= {"registry_record_sha256", "status", "runnable", "blocked_reason"}
     if c.keys() != expected or c["schema_version"] not in (CONFIG_SCHEMA, PUBLIC_SCHEMA):
         raise ValueError("unknown configuration format or missing required settings")
+    if public and _input_type(c) == "continuous":
+        from .virtualtb import validate_config as validate_continuous_config
+        validate_continuous_config(c)
+        return
     if not public and not c["runnable"]:
         raise ValueError(f"profile is blocked: {c['blocked_reason']}")
     m, p, s, w, e = (c[k] for k in ("model", "policy", "scorer", "weighting", "evaluation"))
@@ -174,8 +181,24 @@ def validate_config(c):
         (e, {"phase", "users", "horizon", "batch_size", "reset_block_size", "selection", "allow_final"}),
         (c["data"], {"split_counts", "pair_counts", "preference_rule", "stored_feedback_threshold", "training_units"}
          | ({"validation_preference_rule", "validation_stored_feedback_threshold", "policy_training_units"} if public else set()))]
-    if any(obj.keys() != names for obj, names in keys):
+    optional = {
+        "YahooR3": (set(), set(), {"gradient_clip", "selection"}, set(),
+                    {"context_seed", "feedback_units", "leave_window", "leave_threshold"},
+                    {"pairing", "representation"}),
+        "KuaiRand": ({"catalog_items", "users"}, {"optimizer_updates", "trajectory_draws"},
+                     {"gradient_clip", "selection"}, set(),
+                     {"context_seed", "feedback_units", "native_quitting", "category_window",
+                      "literal_python_slice", "matched_resets"},
+                     {"bundle_identity", "pairing", "representation"}),
+    }
+    extras = optional.get(c["dataset"], (set(),) * len(keys)) if public else (set(),) * len(keys)
+    extras = (extras[0] | {"input_type", "user_features", "catalog_items"}, *extras[1:])
+    if any(not names <= obj.keys() or not obj.keys() <= names | extra
+           for (obj, names), extra in zip(keys, extras, strict=True)):
         raise ValueError("unknown or missing executable recipe fields")
+    if (_input_type(c) != "catalog" or m.get("user_features", "projected") not in ("projected", "zero")
+            or (m.get("user_features") == "zero" and "catalog_items" not in m)):
+        raise ValueError("invalid configured catalog model inputs")
     for obj, names in ((m, ("hidden_dim", "layers", "heads", "conv_window", "feature_dim", "horizon")),
                        (p, ("epochs", "draws_per_epoch", "batch_size", "cosine_horizon_updates", "checkpoint_interval_updates")),
                        (s, ("hidden_dim", "layers", "heads", "epochs", "batch_size", "checkpoint_interval_updates")),
@@ -203,13 +226,15 @@ def validate_config(c):
         for rule_key, threshold_key in (("preference_rule", "stored_feedback_threshold"),
                                         ("validation_preference_rule", "validation_stored_feedback_threshold")):
             rule, threshold = c["data"][rule_key], c["data"][threshold_key]
-            if rule == "cumulative_logged_feedback":
+            if rule in ("cumulative_logged_feedback", "cumulative_logged_native_feedback"):
                 if threshold is not None:
                     raise ValueError("cumulative labels have no count threshold")
             elif not isinstance(threshold, (int, float)) or isinstance(threshold, bool) or not math.isfinite(threshold):
                 raise ValueError("count labels need an explicit finite threshold")
     if (w["rule"] not in ("global_softmax", "fixed_collector_prior") or not math.isfinite(w["beta"]) or w["beta"] < 0
-            or w["precision"] not in ("saved_global_float32_then_TRAIN_float64_normalized", "native_float64_softmax")):
+            or w["precision"] not in ("saved_global_float32_then_TRAIN_float64_normalized",
+                                     "saved_global_float32_then_TRAIN_numpy_float64_normalized",
+                                     "native_float64_softmax")):
         raise ValueError("declare the global softmax or fixed collector prior and its precision explicitly")
     if w["rule"] == "fixed_collector_prior":
         prior = w["collector_prior"]
@@ -217,6 +242,10 @@ def validate_config(c):
             raise ValueError("collector prior must be a positive normalized fixed map")
     elif w["collector_prior"] is not None:
         raise ValueError("global sampling does not use a collector prior")
+
+
+def _input_type(config):
+    return config["model"].get("input_type", "catalog")
 
 
 def check(profile, data_root, *, seed=0):
@@ -229,7 +258,9 @@ def check(profile, data_root, *, seed=0):
         raise ValueError("missing portable bundle.json; native assets must be exported explicitly, never inferred from historical absolute paths")
     b = read(bundle_path)
     b.setdefault("schema_version", BUNDLE_SCHEMA)
-    adapter_aliases = {"movielens": "movielens_native_v1", "kuairec": "kuairec_native_v1", "coat": "coat_native_v1"}
+    adapter_aliases = {"movielens": "movielens_native_v1", "kuairec": "kuairec_native_v1",
+                       "coat": "coat_native_v1", "yahoor3": "yahoor3_native_v1",
+                       "kuairand": "kuairand_native_v1"}
     evaluation = b.get("evaluation", {})
     if isinstance(evaluation, dict) and evaluation.get("adapter") in adapter_aliases:
         evaluation["adapter"] = adapter_aliases[evaluation["adapter"]]
@@ -249,7 +280,9 @@ def check(profile, data_root, *, seed=0):
         raise ValueError("bundle evaluation requires its fixed DEV cases and horizon")
     native = {"MovieLens": ("movielens_native_v1", {"world", "distance"}, 7, 75),
               "KuaiRec": ("kuairec_native_v1", {"world", "categories", "response_transform"}, 9, 1),
-              "Coat": ("coat_native_v1", {"world", "distance"}, 7, 6)}
+              "Coat": ("coat_native_v1", {"world", "distance"}, 7, 6),
+              "YahooR3": ("yahoor3_native_v1", {"world", "distance"}, 3, 120),
+              "KuaiRand": ("kuairand_native_v1", {"world", "categories"}, 10, None)}
     if b["dataset"] in native:
         adapter, assets, window, threshold = native[b["dataset"]]
         if (b["evaluation"].get("adapter") != adapter or not assets <= b["assets"].keys()
@@ -280,9 +313,11 @@ def check(profile, data_root, *, seed=0):
             raise ValueError(f"missing or changed portable asset {name}")
     if ("scores" in b["assets"] or "weights" in b["assets"]) and (type(b.get("score_cache_seed")) is not int or b.get("score_cache_seed") != seed):
         raise ValueError("cached scorer assets must belong to this exact training seed")
-    numerical_sources = ["plain.py", "plain_environments.py", "data.py", "models.py", "training.py", "objective.py", "features.py", "loss.py"]
-    if config["dataset"] == "KuaiRec":
-        numerical_sources += ["kuairec.py", "kuairec_models.py"]
+    numerical_sources = ["runner.py", "environments.py", "data.py", "models.py", "training.py", "objective.py"]
+    if config["dataset"] == "YahooR3":
+        numerical_sources.append("yahoor3.py")
+    elif config["dataset"] == "KuaiRand":
+        numerical_sources.append("kuairand.py")
     summary = {"version": VERSION, "config": config, "bundle": b, "bundle_sha256": digest(bundle_path), "seed": seed,
                "implementation_sha256": {name: digest(Path(__file__).parent / name) for name in numerical_sources}}
     summary["identity"] = identity(summary)
@@ -318,6 +353,7 @@ def load_data(run, root):
     n, horizon = actions.shape
     if (mask.dtype != np.bool_ or feedback.shape != actions.shape or mask.shape != actions.shape
             or actions.dtype.kind not in "iu" or horizon != c["model"]["horizon"]
+            or int(a["n_items"]) - 2 != c["model"].get("catalog_items", int(a["n_items"]) - 2)
             or int(a["max_length"]) != horizon or not np.all(np.isin(a["splits"], [0, 1]))
             or len(np.unique(a["indices"])) != n or np.any(a["indices"] < 0)
             or not np.all(mask == (np.arange(horizon)[None, :] < mask.sum(1)[:, None]))
@@ -327,7 +363,8 @@ def load_data(run, root):
     for name in ("users", "indices", "splits", "initial_context_actions") + (("raw_users", "preference_score") if public else ("positive_count",)):
         if a[name].shape != (n,):
             raise ValueError("corpus row metadata must be aligned")
-    user_lower = 0 if c["dataset"] == "KuaiRec" else 1
+    user_mode = c["model"].get("user_features", "projected")
+    user_lower = 0 if user_mode == "zero" else 1
     if (np.any(a["users"] < user_lower) or np.any(a["users"] >= int(a["n_users"]))
             or np.any((a["initial_context_actions"] != 0) & ((a["initial_context_actions"] < 2) | (a["initial_context_actions"] >= int(a["n_items"]))))):
         raise ValueError("invalid encoded TRAIN users/reset contexts")
@@ -342,11 +379,18 @@ def load_data(run, root):
         for split, rule, threshold in (
             ("train", c["data"]["preference_rule"], c["data"]["stored_feedback_threshold"]),
             ("validation", c["data"]["validation_preference_rule"], c["data"]["validation_stored_feedback_threshold"])):
-            if rule == "cumulative_logged_feedback":
+            if rule in ("cumulative_logged_feedback", "cumulative_logged_native_feedback"):
                 label = a.get("label_feedback")
                 if label is None or label.shape != actions.shape or not np.isfinite(label[mask]).all():
                     raise ValueError("cumulative labels require separate finite label_feedback on all executed actions")
-                scores[split] = np.where(mask, label, 0.).sum(axis=1, dtype=np.float64)
+                if c["dataset"] == "YahooR3":
+                    from .yahoor3 import preference_scores
+                    scores[split] = preference_scores(label, mask)
+                elif c["dataset"] == "KuaiRand":
+                    from .kuairand import preference_scores
+                    scores[split] = preference_scores(label, mask)
+                else:
+                    scores[split] = np.where(mask, label, 0.).sum(axis=1, dtype=np.float64)
             else:
                 scores[split] = ((feedback > threshold) & mask).sum(axis=1).astype(np.float64)
         score = np.where(a["splits"] == 0, scores["train"], scores["validation"])
@@ -373,7 +417,7 @@ def load_data(run, root):
                                      for i, t in enumerate(trajectories)], corpus.n_users, corpus.n_items, horizon)
     features = load_asset(root, b, "features")
     width = c["model"]["feature_dim"]
-    required_features = {"item_vectors"} if c["dataset"] == "KuaiRec" else {"user_vectors", "item_vectors"}
+    required_features = {"item_vectors"} if user_mode == "zero" else {"user_vectors", "item_vectors"}
     if (set(features) != required_features
             or ("user_vectors" in features and features["user_vectors"].shape != (corpus.n_users, width))
             or features["item_vectors"].shape != (corpus.n_items - 2, width)
@@ -397,6 +441,8 @@ def load_data(run, root):
             expected = 1. if x.positive_count > y.positive_count else 0. if x.positive_count < y.positive_count else .5
             if high == low or x.split != split or y.split != split or x.user_id != y.user_id or value != expected:
                 raise ValueError("pair crosses user/split, compares itself, or violates its feedback target")
+            if c["dataset"] in ("YahooR3", "KuaiRand") and value != 1.:
+                raise ValueError("native cumulative-feedback pairs must be strict and stored preferred first")
     collectors = load_asset(root, b, "collectors")
     if set(collectors) != {"indices", "collectors"} or not np.array_equal(collectors["indices"], a["indices"]) or collectors["collectors"].shape != (n,):
         raise ValueError("collector labels must align exactly with canonical global episode IDs")
@@ -465,7 +511,7 @@ def _validate_cohorts(bundle, root, arrays, cases):
 def locked(output):
     import fcntl
     path = Path(output); path.mkdir(parents=True, exist_ok=True)
-    with (path / ".plain.lock").open("a+") as stream:
+    with (path / LOCK_NAME).open("a+") as stream:
         try:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
@@ -476,13 +522,40 @@ def locked(output):
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def _bound_run(run, saved):
+    if saved == run:
+        return run
+    dataset = run["config"]["dataset"]
+    if dataset in ("MovieLens", "KuaiRec", "Coat"):
+        previous = deepcopy(run)
+        geometry = previous["config"]["model"]
+        user_mode = "zero" if dataset == "KuaiRec" else "projected"
+        if (geometry.pop("input_type", "catalog") == "catalog"
+                and geometry.pop("user_features", "projected") == user_mode
+                and geometry.pop("catalog_items", None) == (3327 if user_mode == "zero" else None)):
+            sources = _INITIAL_RELEASE_SOURCES.copy()
+            if user_mode == "zero":
+                sources["kuairec.py"] = "41d5a709246219bd4e537fca4b6c85bd2d072622d4575e449359ec63a727cbd6"
+                sources["kuairec_models.py"] = sources["models.py"]
+            previous["implementation_sha256"] = sources
+            previous.pop("identity")
+            previous["identity"] = identity(previous)
+            if saved == previous:
+                return {**run, "identity": previous["identity"], "initial_release_config": previous["config"]}
+    raise ValueError("run identity collision or changed inputs; prepare this exact config/data/seed first")
+
+
 def prepare(profile, data_root, output_root, *, seed=0):
     run = check(profile, data_root, seed=seed)
     with locked(output_root):
-        if not (Path(output_root) / "run.json").exists() and any(p.name != ".plain.lock" for p in Path(output_root).iterdir()):
+        binding = Path(output_root) / "run.json"
+        if not binding.exists() and any(p.name != LOCK_NAME for p in Path(output_root).iterdir()):
             raise ValueError("foreign nonempty output directory; choose a fresh run root")
-        data = deep_check(run, data_root)
-        put(Path(output_root) / "run.json", run, immutable=True)
+        deep_check(run, data_root)
+        if binding.exists():
+            run = _bound_run(run, read(binding))
+        else:
+            put(binding, run, immutable=True)
         p = run["config"]["policy"]
         summary = dict(status="prepared", identity=run["identity"], profile=run["config"]["profile_id"], seed=seed,
             split_counts=run["bundle"]["split_counts"], pair_counts=run["bundle"]["pair_counts"],
@@ -496,8 +569,9 @@ def prepare(profile, data_root, output_root, *, seed=0):
 def open_run(profile, data_root, output_root, seed):
     run = check(profile, data_root, seed=seed)
     path = Path(output_root) / "run.json"
-    if not path.exists() or read(path) != run:
+    if not path.exists():
         raise ValueError("run identity missing or changed; prepare this exact config/data/seed first")
+    run = _bound_run(run, read(path))
     return run, load_data(run, data_root)
 
 
@@ -573,7 +647,13 @@ def build_evaluation_adapter(bundle, root):
     if bundle["dataset"] == "fixture":
         if bundle["evaluation"]["adapter"] != "fixture_test_v1": raise ValueError("unknown fixture adapter")
         return FixtureDEV(bundle, root)
-    from .plain_environments import build_adapter
+    if bundle["dataset"] == "YahooR3":
+        from .yahoor3 import build_adapter
+        return build_adapter(bundle, root)
+    if bundle["dataset"] == "KuaiRand":
+        from .kuairand import build_adapter
+        return build_adapter(bundle, root)
+    from .environments import build_adapter
     return build_adapter(bundle, root)
 
 
@@ -582,7 +662,7 @@ def deep_check(run, root):
     data = load_data(run, root)
     validate_units(run["bundle"]["units"]["training"])
     build_evaluation_adapter(run["bundle"], root)
-    if run["bundle"]["dataset"] in ("MovieLens", "Coat"):
+    if run["bundle"]["dataset"] in ("MovieLens", "Coat", "YahooR3"):
         units = run["bundle"]["units"]["evaluation"]
         validate_units(units)
         if units["mapping"] != "affine" or units["offset"] != 0. or units["scale"] != 5.:
@@ -590,28 +670,10 @@ def deep_check(run, root):
     elif run["bundle"]["dataset"] == "KuaiRec":
         if run["bundle"]["units"]["evaluation"] != {"mapping": "item_train_range_minus_response_min"}:
             raise ValueError("KuaiRec rollout requires its frozen item-specific TRAIN response transform")
+    elif run["bundle"]["dataset"] == "KuaiRand":
+        if run["bundle"]["units"]["evaluation"] != {"mapping": "identity"}:
+            raise ValueError("KuaiRand rollout uses native feedback directly")
     return data
-
-
-def make_model(data, config, device, *, scorer=False):
-    """Execute the native constructor, including its discarded initial layers."""
-    import torch
-    from torch import nn
-    from .features import make_dc, make_scorer
-    corpus, features = data["corpus"], data["features"]
-    m, s = config["model"], config["scorer"]
-    if config["dataset"] != "KuaiRec" and m["feature_dim"] == 40:
-        cfg = dict(policy=m, scorer=s)
-        return (make_scorer if scorer else make_dc)(corpus, features, cfg, device)
-    if config["dataset"] != "KuaiRec" or m["feature_dim"] != 41 or corpus.n_items != 3329 or corpus.max_length != 40:
-        raise ValueError("native KuaiRec requires its released 3327-item, H40, identity-free 41D constructor")
-    from .kuairec import KuairecPrDTPolicy, KuairecTrajectoryScorer
-    values = torch.zeros((corpus.n_items, m["feature_dim"]), dtype=torch.float32)
-    values[2:] = torch.as_tensor(features["item_vectors"], dtype=torch.float32)
-    settings = s if scorer else m
-    names = ("hidden_dim", "layers", "heads", "dropout") if scorer else ("hidden_dim", "layers", "heads", "dropout", "conv_window")
-    model = (KuairecTrajectoryScorer if scorer else KuairecPrDTPolicy)(values, **{k: settings[k] for k in names})
-    return model.to(device)
 
 
 def moved(batch, device):
@@ -622,7 +684,8 @@ def collate(rows, run, *, scorer=False):
     import torch
     from .data import collate_trajectories
     batch = collate_trajectories(rows)
-    if run["config"]["dataset"] == "KuaiRec": batch["users"].zero_()
+    if run["config"]["model"].get("user_features") == "zero":
+        batch["users"].zero_()
     stage = "scorer" if scorer else "policy"
     if run["config"][stage]["full_context_batches"]:
         horizon = run["config"]["model"]["horizon"]
@@ -636,7 +699,10 @@ def load_checkpoint(path, run, stage, device):
     import torch
     if not Path(path).exists(): return None
     saved = torch.load(path, map_location="cpu", weights_only=False)
-    if (saved.get("version") != VERSION or saved.get("identity") != run["identity"] or saved.get("config") != run["config"]
+    valid_configs = [run["config"]]
+    if "initial_release_config" in run:
+        valid_configs.append(run["initial_release_config"])
+    if (saved.get("version") != VERSION or saved.get("identity") != run["identity"] or saved.get("config") not in valid_configs
             or saved.get("stage") != stage or saved.get("device_type") != device.type):
         raise ValueError("checkpoint config/data/stage/backend identity mismatch; preserve existing output")
     state, cfg = saved["state"], run["config"][stage]
@@ -680,7 +746,6 @@ def _stage_state(run, stage, model, optimizer, generator, device, state, **extra
 def _score_output(run, data, model, root, output, device, generator):
     import numpy as np
     import torch
-    from .data import collate_trajectories
     from .training import _rng_state, _restore_rng_state
     before = _rng_state(generator); scores, ids = [], []
     try:
@@ -703,6 +768,8 @@ def _score_output(run, data, model, root, output, device, generator):
 
 def _public_preference_loss(logits, targets, dataset):
     import torch.nn.functional as F
+    if dataset in ("YahooR3", "KuaiRand"):
+        return F.softplus(-logits).mean()
     if dataset in ("Coat", "KuaiRec"):
         # Coat's soft targets and KuaiRec's strict pairs retain their native
         # softplus implementation; MovieLens uses the retained BCE primitive.
@@ -716,8 +783,8 @@ def _scorer_validation(run, data, model, device):
     from torch.utils.data import DataLoader
     cfg=run["config"]["scorer"]; pairs=data["pairs"]
     high,low=pairs["validation_preferred"],pairs["validation_rejected"]
-    if run["config"]["dataset"] == "Coat":
-        # Native Coat iterates a non-shuffled, unseeded validation loader.
+    if run["config"]["dataset"] in ("Coat", "YahooR3", "KuaiRand"):
+        # These recipes iterate a non-shuffled, unseeded validation loader.
         # Its CPU base-seed draw is part of the following epoch's dropout RNG.
         batches=DataLoader(range(len(high)),batch_size=cfg["batch_size"],shuffle=False)
     else:
@@ -738,7 +805,8 @@ def _scorer_validation(run, data, model, device):
                 correct+=int((((delta>0)&(target==1))|((delta<0)&(target==0))).sum())
                 strict_count+=int(strict.sum());ties+=int((~strict).sum());count+=len(indices)
     finally:
-        model.train(was_training)
+        if run["config"]["dataset"] not in ("YahooR3", "KuaiRand"):
+            model.train(was_training)
     return dict(validation_pair_nll=nll/count if count else None,
                 validation_pair_accuracy=correct/strict_count if strict_count else None,
                 validation_pairs=count,validation_ties=ties)
@@ -748,7 +816,7 @@ def scorer(profile, data_root, output_root, *, seed=0, device="auto", stop_after
     import numpy as np
     import torch
     from torch.utils.data import DataLoader
-    from .data import collate_trajectories
+    from .models import make_model
     from .objective import bradley_terry_loss
     from .training import choose_device, seed_everything, _restore_rng_state
     output = Path(output_root)
@@ -769,7 +837,8 @@ def scorer(profile, data_root, output_root, *, seed=0, device="auto", stop_after
                 source_sha256=run["bundle"]["assets"]["scores"]["sha256"])
             put(result_path, result, immutable=True); return result
         dev = choose_device(device); seed_everything(seed)
-        model = make_model(data, run["config"], dev, scorer=True); cfg = run["config"]["scorer"]
+        model = make_model(run["config"], dev, scorer=True, corpus=data["corpus"], features=data["features"])
+        cfg = run["config"]["scorer"]
         optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["learning_rate"], weight_decay=0.)
         gen = torch.Generator().manual_seed(seed); reg = torch.Generator().manual_seed(seed + 991)
         reg_np = np.random.default_rng(0)
@@ -782,6 +851,9 @@ def scorer(profile, data_root, output_root, *, seed=0, device="auto", stop_after
         pairs = data["pairs"]; high, low = pairs["train_preferred"], pairs["train_rejected"]
         rows = data["corpus"].split("train")
         if not len(high): raise ValueError("no frozen strict TRAIN pairs; no scorer can be fitted")
+        # These retained scorers enter training mode at invocation, then stay
+        # in evaluation mode after the first validation pass of that invocation.
+        native_validation_mode = run["config"]["dataset"] in ("YahooR3", "KuaiRand")
         while state["epoch"] < cfg["epochs"]:
             if state["order"] is None:
                 if cfg["pair_order_rng"] == "numpy_epoch_seed":
@@ -791,7 +863,9 @@ def scorer(profile, data_root, output_root, *, seed=0, device="auto", stop_after
                     state["order"] = torch.randperm(len(high), generator=gen)
                 else:
                     state["order"] = torch.cat(list(DataLoader(range(len(high)), batch_size=cfg["batch_size"], shuffle=True, generator=gen)))
-            order = state["order"]; model.train()
+            order = state["order"]
+            if not native_validation_mode:
+                model.train()
             for start in range(state["batch_offset"], len(order), cfg["batch_size"]):
                 indices = order[start:start + cfg["batch_size"]].tolist()
                 def inputs(ids):
@@ -874,7 +948,12 @@ def probabilities(run, data, data_root, output):
         raw = global_softmax_weights(torch.from_numpy(cached["scores"]).double(), w["beta"]).float()
     q = raw.double()
     if not torch.isfinite(q).all() or torch.any(q <= 0): raise ValueError("global softmax must retain positive finite TRAIN support")
-    q /= q.sum(); source = q.clone(); ids = list(map(int, cached["indices"]))
+    if w["precision"] == "saved_global_float32_then_TRAIN_numpy_float64_normalized":
+        values = q.numpy()
+        values /= values.sum(dtype=np.float64)
+    else:
+        q /= q.sum()
+    source = q.clone(); ids = list(map(int, cached["indices"]))
     if w["rule"] == "fixed_collector_prior":
         labels = [data["collectors"][i] for i in ids]
         if set(labels) != set(w["collector_prior"]): raise ValueError("fixed collector support differs from the frozen prior")
@@ -890,8 +969,8 @@ def policy(profile, data_root, output_root, *, seed=0, device="auto", stop_after
     import numpy as np
     import torch
     from torch.utils.data import DataLoader, WeightedRandomSampler
-    from .data import collate_trajectories
-    from .loss import per_trajectory_mean_action_nll
+    from .models import make_model
+    from .objective import per_trajectory_mean_action_nll
     from .training import choose_device, seed_everything, _restore_rng_state
     output = Path(output_root)
     with locked(output):
@@ -905,7 +984,8 @@ def policy(profile, data_root, output_root, *, seed=0, device="auto", stop_after
                 raise ValueError("completed policy binding changed")
             return result
         dev = choose_device(device); seed_everything(seed)
-        model = make_model(data, run["config"], dev); cfg = run["config"]["policy"]
+        model = make_model(run["config"], dev, corpus=data["corpus"], features=data["features"])
+        cfg = run["config"]["policy"]
         optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"])
         gen = torch.Generator().manual_seed(77 + seed)
         sampler_np = np.random.default_rng(77 + seed)
@@ -970,6 +1050,7 @@ def evaluate(profile, data_root, output_root, *, seed=0, device="auto", adapter_
     """Closed DEV evaluation. No teacher forcing, repeat exclusion or terminal mask loss."""
     import numpy as np
     import torch
+    from .models import make_model
     from .training import choose_device, seed_everything
     output = Path(output_root)
     with locked(output):
@@ -981,7 +1062,9 @@ def evaluate(profile, data_root, output_root, *, seed=0, device="auto", adapter_
         if result_path.exists():
             result = read(result_path)
             if (result["identity"] != run["identity"] or digest(output / "development_raw.json") != result["raw_sha256"]
-                    or digest(output / "development_logits.npz") != result["logits_sha256"]): raise ValueError("completed DEV evidence changed")
+                    or (result["logits_sha256"] is not None and
+                        digest(output / "development_logits.npz") != result["logits_sha256"])):
+                raise ValueError("completed DEV evidence changed")
             return result
         attempt = output / "evaluation_attempt.json"
         if attempt.exists():
@@ -990,7 +1073,9 @@ def evaluate(profile, data_root, output_root, *, seed=0, device="auto", adapter_
         if adapter_factory is None:
             adapter_factory = build_evaluation_adapter
         adapter = adapter_factory(run["bundle"], Path(data_root))
-        seed_everything(seed); model = make_model(data, run["config"], dev)
+        capture_logits = run["config"]["dataset"] not in ("YahooR3", "KuaiRand")
+        seed_everything(seed)
+        model = make_model(run["config"], dev, corpus=data["corpus"], features=data["features"])
         checkpoint = load_checkpoint(output / "policy_final.pt", run, "policy", dev)
         if checkpoint["state"]["epoch"] != run["config"]["policy"]["epochs"]: raise ValueError("incomplete fixed policy")
         model.load_state_dict(checkpoint["model"]); model.eval()
@@ -1027,7 +1112,9 @@ def evaluate(profile, data_root, output_root, *, seed=0, device="auto", adapter_
                         chosen = torch.argmax(logits, dim=-1).cpu().tolist()
                         for j, i in enumerate(selected):
                             record, actor, action = records[i], actors[i], int(chosen[j]) + 2
-                            catalog.append(logits[j].float().cpu().numpy()); positions.append([record["raw_user"], t])
+                            if capture_logits:
+                                catalog.append(logits[j].float().cpu().numpy())
+                                positions.append([record["raw_user"], t])
                             reward, terminated, info = actor.step(action)
                             if not math.isfinite(reward) or type(terminated) is not bool: raise ValueError("invalid native reward/termination")
                             record["actions"].append(action); record["rewards"].append(float(reward)); record["native_info"].append(info)
@@ -1040,14 +1127,21 @@ def evaluate(profile, data_root, output_root, *, seed=0, device="auto", adapter_
                     record.update(length=len(record["actions"]), cumulative_reward=sum(record["rewards"]), cap_hit=len(record["actions"]) == horizon)
                 episodes.extend(records)
         put(output / "development_raw.json", dict(identity=run["identity"], phase="development", episodes=episodes), immutable=True)
-        with (output / "development_logits.npz").open("wb") as stream:
-            np.savez_compressed(stream, original_real_logits=np.asarray(catalog, dtype=np.float32),
-                raw_user_and_past_executions=np.asarray(positions, dtype=np.int64))
+        logits_sha256 = None
+        if capture_logits:
+            with (output / "development_logits.npz").open("wb") as stream:
+                np.savez_compressed(stream, original_real_logits=np.asarray(catalog, dtype=np.float32),
+                    raw_user_and_past_executions=np.asarray(positions, dtype=np.int64))
+            logits_sha256 = digest(output / "development_logits.npz")
         total_steps = sum(e["length"] for e in episodes); total_reward = sum(e["cumulative_reward"] for e in episodes)
-        result = dict(status="development_complete", identity=run["identity"], users=len(episodes),
+        metrics = dict(
             mean_cumulative_reward=total_reward / len(episodes), pooled_reward_per_step=total_reward / total_steps,
-            mean_length=total_steps / len(episodes), raw_sha256=digest(output / "development_raw.json"),
-            logits_sha256=digest(output / "development_logits.npz"), policy_sha256=policy_result["checkpoint_sha256"],
+            mean_length=total_steps / len(episodes))
+        if hasattr(adapter, "summarize"):
+            metrics = adapter.summarize(episodes)
+        result = dict(status="development_complete", identity=run["identity"], users=len(episodes),
+            **metrics, raw_sha256=digest(output / "development_raw.json"),
+            logits_sha256=logits_sha256, policy_sha256=policy_result["checkpoint_sha256"],
             final_evaluation=False, adapter=run["bundle"]["evaluation"]["adapter"], batch_size=evaluation["batch_size"], reset_block_size=evaluation["reset_block_size"],
             terminal_reward_included=True, ordinary_greedy=True, no_repeat_mask=False)
         put(result_path, result, immutable=True); return result
@@ -1059,6 +1153,7 @@ def main(argv=None):
     parser.add_argument("--profile", default="movielens")
     parser.add_argument("--config", type=Path, help="shared config file; defaults to configs/prdt.json")
     parser.add_argument("--data-root", type=Path)
+    parser.add_argument("--simulator-root", type=Path, help="VirtualTB simulator checkout for development evaluation")
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--device", choices=("auto", "cpu", "mps", "cuda"), default="auto")
     parser.add_argument("--seed", type=int, default=0)
@@ -1070,7 +1165,14 @@ def main(argv=None):
         else:
             if args.config is not None: args.profile = f"{args.config}#{args.profile}"
             if args.data_root is None: parser.error("--data-root is required")
-            if args.stage == "check" or args.dry_run:
+            if str(args.profile).rsplit("#", 1)[-1] == "virtualtb":
+                from .virtualtb import dispatch
+                if args.stage != "check" and not args.dry_run and args.output_root is None:
+                    parser.error("--output-root is required")
+                result = dispatch(args.stage, args.profile, args.data_root, args.output_root,
+                                  seed=args.seed, device=args.device, through=args.through,
+                                  dry_run=args.dry_run, simulator_root=args.simulator_root)
+            elif args.stage == "check" or args.dry_run:
                 run = check(args.profile, args.data_root, seed=args.seed)
                 deep_check(run, args.data_root)
                 result = dict(status="preflight_pass", identity=run["identity"], profile=run["config"]["profile_id"], writes=False, models_constructed=False, payload_validated=True, native_environment_reset_or_step=False)

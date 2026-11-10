@@ -1,4 +1,4 @@
-"""Portable DEV-only native FreeB transition adapters for plain PrDT.
+"""Native FreeB transition adapters for catalog development evaluation.
 
 Small source-equivalent adapters: ML distance75/window7; Coat distance6/window7;
 Kuai category count>1/window9. Literal negative Python slices and terminal rewards are intentional.

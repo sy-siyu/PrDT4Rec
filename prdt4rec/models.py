@@ -1,6 +1,4 @@
 from __future__ import annotations
-import math
-from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -153,3 +151,73 @@ class RecommendationPolicy(nn.Module):
         logits = self.action_head(observation_states)
         unavailable = torch.arange(self.n_items, device=logits.device) < 2
         return logits.masked_fill(unavailable, -torch.inf)
+
+
+class ZeroUserEmbedding(nn.Module):
+    def __init__(self, hidden_dim):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+
+    def forward(self, users):
+        return torch.zeros((*users.shape, self.hidden_dim), device=users.device, dtype=torch.float32)
+
+
+def _projected_lookup(values, hidden_dim):
+    return nn.Sequential(
+        nn.Embedding.from_pretrained(values, freeze=True, padding_idx=0),
+        nn.Linear(values.shape[1], hidden_dim, bias=False),
+    )
+
+
+def _feature_table(values, shape):
+    table = torch.as_tensor(values, dtype=torch.float32).clone()
+    if table.shape != shape or not torch.isfinite(table).all():
+        raise ValueError("frozen lookup table has invalid shape or values")
+    return table
+
+
+def make_model(config, device, *, scorer=False, corpus=None, features=None):
+    """Construct the configured PrDT scorer or policy with native parameter order."""
+    geometry = config["model"]
+    values = config["scorer"] if scorer else geometry
+    settings = {key: values[key] for key in ("hidden_dim", "layers", "heads", "dropout")}
+    input_type = geometry.get("input_type", "catalog")
+    if input_type == "continuous":
+        from .continuous import ContinuousSequencePolicy, ContinuousTrajectoryScorer
+        settings.update(observation_dim=geometry["observation_dim"], action_dim=geometry["action_dim"],
+                        max_length=geometry["horizon"])
+        if scorer:
+            return ContinuousTrajectoryScorer(**settings).to(device)
+        return ContinuousSequencePolicy(mode="prdt", conv_window=geometry["conv_window"],
+                                        fixed_std=geometry["fixed_std"], **settings).to(device)
+    if input_type != "catalog" or corpus is None or features is None:
+        raise ValueError("catalog models require a trajectory corpus and frozen feature tables")
+
+    user_mode = geometry.get("user_features", "projected")
+    if user_mode not in ("projected", "zero") or corpus.max_length != geometry["horizon"]:
+        raise ValueError("invalid catalog feature or context setting")
+    if corpus.n_items - 2 != geometry.get("catalog_items", corpus.n_items - 2):
+        raise ValueError("corpus catalog differs from the configured model")
+    hidden_dim = settings["hidden_dim"]
+    base = (1 if user_mode == "zero" else corpus.n_users, corpus.n_items, corpus.max_length)
+    # Allocate the original embeddings before replacing them. Their initialisation
+    # consumes RNG and fixes the initial state of subsequent retained layers.
+    if scorer:
+        model = TrajectoryScorer(*base, **settings)
+    else:
+        model = RecommendationPolicy(*base, backbone="convformer",
+                                     conv_window=geometry["conv_window"], **settings)
+    width = geometry["feature_dim"]
+    item_values = _feature_table(features["item_vectors"], (corpus.n_items - 2, width))
+    items = torch.zeros((corpus.n_items, width), dtype=torch.float32)
+    items[2:] = item_values
+    if not scorer:
+        if user_mode == "zero":
+            model.user_embedding = ZeroUserEmbedding(hidden_dim)
+        else:
+            users = _feature_table(features["user_vectors"], (corpus.n_users, width))
+            if torch.count_nonzero(users[0]):
+                raise ValueError("the frozen user PAD row must be zero")
+            model.user_embedding = _projected_lookup(users, hidden_dim)
+    model.item_embedding = _projected_lookup(items, hidden_dim)
+    return model.to(device)

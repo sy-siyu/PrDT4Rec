@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "prdt4rec"
-version = "0.1.0"
+version = "0.2.0"
 description = "Preference-weighted Decision ConvFormer for offline recommendation"
 readme = "README.md"
 requires-python = ">=3.11"
