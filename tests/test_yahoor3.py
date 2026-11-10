@@ -5,9 +5,10 @@ import numpy as np
 import pytest
 import torch
 
-from prdt4rec import runner
+from prdt4rec import runner, training
 from prdt4rec.objective import global_softmax_weights
-from prdt4rec.yahoor3 import YahooR3DEV, convert_bundle, preference_scores
+from prdt4rec.data.yahoor3 import convert_bundle, preference_scores
+from prdt4rec.environments.yahoor3 import YahooR3DEV
 
 
 def test_native_distance_boundary_and_literal_negative_slice():
@@ -109,21 +110,21 @@ def test_yahoor3_conversion_training_resume_and_evaluation(tmp_path):
         full, resumed = tmp_path / "full", tmp_path / "resumed"
         for output in (full, resumed):
             runner.prepare(profile, data, output, seed=2)
-        uninterrupted = runner.scorer(profile, data, full, **common)
-        partial = runner.scorer(profile, data, resumed, stop_after_updates=1, **common)
+        uninterrupted = training.scorer(profile, data, full, **common)
+        partial = training.scorer(profile, data, resumed, stop_after_updates=1, **common)
         assert partial["updates"] == 1
-        restarted = runner.scorer(profile, data, resumed, **common)
+        restarted = training.scorer(profile, data, resumed, **common)
         assert uninterrupted["new_scorer_updates"] == restarted["new_scorer_updates"] == 4
         with np.load(full / "scores.npz") as reference, np.load(resumed / "scores.npz") as restored:
             assert np.array_equal(reference["scores"], restored["scores"])
             stored = global_softmax_weights(torch.from_numpy(reference["scores"]).double(), .1).float().numpy()
         expected = stored.astype(np.float64)
         expected /= expected.sum(dtype=np.float64)
-        q, _ = runner.probabilities(checked, loaded, data, full)
+        q, _ = training.probabilities(checked, loaded, data, full)
         assert np.array_equal(q.numpy(), expected)
-        runner.policy(profile, data, full, **common)
-        assert runner.policy(profile, data, resumed, stop_after_updates=4, **common)["updates"] == 4
-        result = runner.policy(profile, data, resumed, **common)
+        training.policy(profile, data, full, **common)
+        assert training.policy(profile, data, resumed, stop_after_updates=4, **common)["updates"] == 4
+        result = training.policy(profile, data, resumed, **common)
         for key, value in torch.load(full / "policy_final.pt", weights_only=False)["model"].items():
             assert torch.equal(value, torch.load(resumed / "policy_final.pt", weights_only=False)["model"][key])
         state = torch.load(resumed / "policy_final.pt", weights_only=False)["state"]

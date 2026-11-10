@@ -1,3 +1,4 @@
+"""Trajectory records, storage and padded batches."""
 from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
@@ -169,4 +170,3 @@ def collate_trajectories(batch: Sequence[Trajectory]) -> dict[str, torch.Tensor]
         initial_context_actions[row] = trajectory.initial_context_action
     return {"actions": actions, "feedback": feedback, "mask": mask, "users": users, "indices": indices,
             "initial_context_actions": initial_context_actions}
-

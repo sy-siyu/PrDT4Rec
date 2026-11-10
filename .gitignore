@@ -4,7 +4,7 @@ __pycache__/
 build/
 dist/
 .venv/
-data/
+/data/
 outputs/
 *.pt
 *.npz

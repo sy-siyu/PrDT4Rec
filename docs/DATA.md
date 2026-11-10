@@ -19,13 +19,13 @@ Use `--profile`, `--data-root`, `--output-root`, `--seed` and `--device` as show
 The converters below take prepared benchmark assets. Obtain the underlying data, frozen representations, and simulator assets separately.
 
 ```sh
-python -m prdt4rec.yahoor3 --source-root ./retained/yahoor3/shared \
+python -m prdt4rec.data.yahoor3 --source-root ./retained/yahoor3/shared \
   --cohorts ./retained/yahoor3/cohorts.json --matrix ./retained/yahoor3/yahoo_pseudoGT_ratingM.ascii \
   --distance ./retained/yahoor3/distance.npy --data-root ./data/yahoor3
-python -m prdt4rec.kuairand --source-root ./retained/kuairand/shared \
+python -m prdt4rec.data.kuairand --source-root ./retained/kuairand/shared \
   --cohorts ./retained/kuairand/cohorts.json --world ./retained/kuairand/dev-only.npz \
   --categories ./retained/kuairand/item_metadata.csv --data-root ./data/kuairand
-python -m prdt4rec.virtualtb --train ./retained/virtualtb/train.npz \
+python -m prdt4rec.data.virtualtb --train ./retained/virtualtb/train.npz \
   --validation ./retained/virtualtb/validation.npz --development ./retained/virtualtb/profiles.npz \
   --output-root ./data/virtualtb
 ```

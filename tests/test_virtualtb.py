@@ -4,8 +4,9 @@ import numpy as np
 import pytest
 import torch
 
-from prdt4rec import runner, virtualtb
-from prdt4rec.virtualtb_native import VirtualTBH30, profile_digest
+from prdt4rec import runner
+from prdt4rec.data.virtualtb import export_bundle, profile_digest
+from prdt4rec.environments.virtualtb_native import VirtualTBH30
 
 
 @pytest.fixture
@@ -47,7 +48,7 @@ def bundle(tmp_path):
              development_sha256=np.asarray([profile_digest(p) for p in profiles]),
              final_profiles=np.asarray([{"must not decode": True}], dtype=object))
     output = tmp_path / "bundle"
-    assert virtualtb.export_bundle(train, validation, development, output, config_path)["status"] == "preflight_pass"
+    assert export_bundle(train, validation, development, output, config_path)["status"] == "preflight_pass"
     return f"{config_path}#virtualtb", output
 
 
@@ -74,32 +75,32 @@ class NativeSimulator:
 
 def test_virtualtb_stages_checkpoint_resume_and_native_evaluation(bundle, tmp_path):
     profile, data_root = bundle
-    assert virtualtb.dispatch("check", profile, data_root)["models_constructed"] is False
+    assert runner.dispatch_virtualtb("check", profile, data_root)["models_constructed"] is False
     full, resumed = tmp_path / "full", tmp_path / "resume"
     for path in (full, resumed):
-        virtualtb.dispatch("prepare", profile, data_root, path)
-    assert virtualtb.dispatch("resume", profile, data_root, full, device="cpu")["updates"] == 4
-    assert virtualtb.dispatch("scorer", profile, data_root, resumed, device="cpu",
+        runner.dispatch_virtualtb("prepare", profile, data_root, path)
+    assert runner.dispatch_virtualtb("resume", profile, data_root, full, device="cpu")["updates"] == 4
+    assert runner.dispatch_virtualtb("scorer", profile, data_root, resumed, device="cpu",
                               stop_after_updates=1)["status"] == "paused"
-    assert virtualtb.dispatch("resume", profile, data_root, resumed, device="cpu",
+    assert runner.dispatch_virtualtb("resume", profile, data_root, resumed, device="cpu",
                               through="scorer")["updates"] == 3
-    assert virtualtb.dispatch("policy", profile, data_root, resumed, device="cpu",
+    assert runner.dispatch_virtualtb("policy", profile, data_root, resumed, device="cpu",
                               stop_after_updates=1)["status"] == "paused"
-    assert virtualtb.dispatch("resume", profile, data_root, resumed, device="cpu")["draws"] == 6
+    assert runner.dispatch_virtualtb("resume", profile, data_root, resumed, device="cpu")["draws"] == 6
     for name in ("scorer", "policy"):
         lhs, rhs = (torch.load(path / f"{name}.pt", weights_only=False) for path in (full, resumed))
         assert all(torch.equal(lhs["model"][key], rhs["model"][key]) for key in lhs["model"])
         assert torch.equal(lhs["rng"]["torch"], rhs["rng"]["torch"])
     weights = torch.load(resumed / "scores.pt", weights_only=True)["weights"]
     assert weights.dtype == torch.float64 and weights.sum().item() == pytest.approx(1)
-    result = virtualtb.dispatch("evaluate", profile, data_root, resumed, device="cpu",
+    result = runner.dispatch_virtualtb("evaluate", profile, data_root, resumed, device="cpu",
                                 environment_factory=lambda _: VirtualTBH30(NativeSimulator()))
     assert result["episodes"] == 2
     assert result["natural_terminations"] == result["h30_truncations"] == 1
     assert result["mean_cumulative_raw_clicks"] == 48
     assert result["pooled_clicks_per_page"] == 3
     assert result["final_rollouts"] == 0
-    assert virtualtb.dispatch("evaluate", profile, data_root, resumed, device="cpu",
+    assert runner.dispatch_virtualtb("evaluate", profile, data_root, resumed, device="cpu",
                               environment_factory=lambda _: pytest.fail("repeated evaluation")) == result
 
 

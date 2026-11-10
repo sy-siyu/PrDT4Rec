@@ -1,4 +1,4 @@
-"""Profile-conditioned, H30 access to the external VirtualTaobao simulator."""
+"""Profile-conditioned access to the external VirtualTaobao simulator at H30."""
 
 from contextlib import contextmanager
 from copy import deepcopy
@@ -11,8 +11,6 @@ import numpy as np
 import torch
 
 
-def profile_digest(profile):
-    return hashlib.sha256(np.ascontiguousarray(profile, dtype=np.float32).tobytes()).hexdigest()
 
 
 def reset_seed(domain, digest):

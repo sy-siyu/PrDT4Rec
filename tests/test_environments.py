@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from prdt4rec.environments import MovieLensDEV,KuaiRecDEV
+from prdt4rec.environments.common import MovieLensDEV,KuaiRecDEV
 
 
 def setup(n=60):
@@ -47,7 +47,7 @@ def test_kuairec_native_category_multiplicity_and_feedback():
 
 
 def test_coat_h30_native_threshold_and_terminal_inclusion():
-    from prdt4rec.environments import CoatDEV
+    from prdt4rec.environments.common import CoatDEV
     args=setup();distance=np.full((60,60),7.);np.fill_diagonal(distance,0)
     env=CoatDEV(*args,distance);env.reset(11,2)
     for t in range(30):
@@ -71,7 +71,7 @@ def test_movielens_and_kuairec_h30_keep_h40_training_separate():
 
 
 def test_coat_public_adapter_routes_h30_and_rejects_wrong_native_rule(tmp_path):
-    from prdt4rec.environments import CoatDEV, build_adapter
+    from prdt4rec.environments.common import CoatDEV, build_adapter
     rewards, raw_users, raw_items, cases=setup()
     arrays={'world':dict(rewards=rewards,raw_users=raw_users,raw_items=raw_items),
             'dev_cases':cases,'distance':dict(distance=np.full((60,60),7.))}

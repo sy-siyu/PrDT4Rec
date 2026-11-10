@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 import torch
 
-from prdt4rec import runner
-from prdt4rec.kuairand import KuaiRandDEV, convert_bundle, preference_scores
+from prdt4rec import runner, training
+from prdt4rec.data.kuairand import convert_bundle, preference_scores
+from prdt4rec.environments.kuairand import KuaiRandDEV
 
 
 @pytest.fixture
@@ -104,19 +105,19 @@ def test_native_pipeline_resume_and_eval(small_bundle):
     assert runner.main(["check", "--dry-run", "--profile", str(profile), "--data-root", str(data)]) == 0
     for output in (direct, resumed):
         runner.prepare(profile, data, output, seed=2)
-    interrupted = runner.scorer(profile, data, resumed, seed=2, device="cpu", stop_after_updates=1)
+    interrupted = training.scorer(profile, data, resumed, seed=2, device="cpu", stop_after_updates=1)
     assert interrupted["updates"] == 1
     for output in (direct, resumed):
-        runner.scorer(profile, data, output, seed=2, device="cpu")
+        training.scorer(profile, data, output, seed=2, device="cpu")
     with np.load(direct / "scores.npz") as expected, np.load(resumed / "scores.npz") as actual:
         assert np.array_equal(expected["scores"], actual["scores"])
         from prdt4rec.objective import global_softmax_weights
         stored = global_softmax_weights(torch.from_numpy(expected["scores"]).double(), .5).float().numpy()
         probabilities = stored.astype(np.float64)
         probabilities /= probabilities.sum(dtype=np.float64)
-    runner.policy(profile, data, resumed, seed=2, device="cpu", stop_after_updates=2)
+    training.policy(profile, data, resumed, seed=2, device="cpu", stop_after_updates=2)
     for output in (direct, resumed):
-        result = runner.policy(profile, data, output, seed=2, device="cpu")
+        result = training.policy(profile, data, output, seed=2, device="cpu")
         assert (result["optimizer_updates"], result["trajectory_draws"], result["valid_action_targets"]) == (6, 10, 20)
     expected = torch.load(direct / "policy_final.pt", weights_only=False)
     actual = torch.load(resumed / "policy_final.pt", weights_only=False)

@@ -18,7 +18,8 @@ import pytest
 
 import torch
 
-from prdt4rec import models, runner
+from prdt4rec import models, runner, training
+from prdt4rec.data.bundles import normalize
 
 def make_fixture(root):
     """Return (strict fixture recipe, portable data root); never train on creation."""
@@ -78,7 +79,7 @@ def rewrite_asset(d,name,fn):
     (d/'bundle.json').write_text(json.dumps(b))
 
 def train(p,d,o):
-    runner.prepare(p,d,o);runner.scorer(p,d,o,device='cpu');return runner.policy(p,d,o,device='cpu')
+    runner.prepare(p,d,o);training.scorer(p,d,o,device='cpu');return training.policy(p,d,o,device='cpu')
 
 def test_import_help_no_torch_or_training():
     r=subprocess.run([sys.executable,'-c',"import sys;import prdt4rec.runner;assert 'torch' not in sys.modules;prdt4rec.runner.main(['--help'])"],cwd=runner.PROJECT,text=True,capture_output=True)
@@ -141,10 +142,10 @@ def test_prepare_idempotent_collision(fixture):
 
 def test_actual_tiny_pipeline_mid_scorer_and_policy_resume_exact(fixture,tmp_path):
     p,d,full=fixture;resumed=tmp_path/'resumed';train(p,d,full);runner.prepare(p,d,resumed)
-    assert runner.scorer(p,d,resumed,device='cpu',stop_after_updates=1)['updates']==1
-    runner.scorer(p,d,resumed,device='cpu')
-    assert runner.policy(p,d,resumed,device='cpu',stop_after_updates=2)['updates']==2
-    result=runner.policy(p,d,resumed,device='cpu')
+    assert training.scorer(p,d,resumed,device='cpu',stop_after_updates=1)['updates']==1
+    training.scorer(p,d,resumed,device='cpu')
+    assert training.policy(p,d,resumed,device='cpu',stop_after_updates=2)['updates']==2
+    result=training.policy(p,d,resumed,device='cpu')
     assert result['optimizer_updates']==6 and result['trajectory_draws']==14
     assert [r['draws']for r in result['history']]==[7,7] and [r['updates']for r in result['history']]==[3,3]
     for filename in('scorer_latest.pt','policy_final.pt'):
@@ -153,19 +154,19 @@ def test_actual_tiny_pipeline_mid_scorer_and_policy_resume_exact(fixture,tmp_pat
     saved=torch.load(resumed/'policy_final.pt',map_location='cpu',weights_only=False)
     assert saved['optimizer']['state'] and saved['rng']['loader'].dtype==torch.uint8
     rates=[r for h in saved['state']['history']for r in h['applied_learning_rates']]
-    assert rates==[runner.learning_rate(runner.read(p)['policy'],i)for i in range(6)]
+    assert rates==[training.learning_rate(runner.read(p)['policy'],i)for i in range(6)]
     assert rates[-1]>runner.read(p)['policy']['minimum_learning_rate']
 
 def test_complete_fit_reuse_no_model(fixture,monkeypatch):
     p,d,o=fixture;train(p,d,o);before={n:(o/n).read_bytes()for n in('policy_final.pt','policy.json','scorer.json')}
     monkeypatch.setattr(models,'make_model',lambda*a,**k:pytest.fail('duplicate completed fit'))
-    assert runner.scorer(p,d,o,device='cpu')['status']=='scorer_complete'
-    assert runner.policy(p,d,o,device='cpu')['status']=='policy_complete'
+    assert training.scorer(p,d,o,device='cpu')['status']=='scorer_complete'
+    assert training.policy(p,d,o,device='cpu')['status']=='policy_complete'
     assert all((o/k).read_bytes()==v for k,v in before.items())
 
 @pytest.mark.parametrize('mutation',['identity','backend','config','counter','rates','draws','schedule'])
 def test_checkpoint_state_mismatch_rejected(fixture,mutation):
-    p,d,o=fixture;runner.prepare(p,d,o);runner.scorer(p,d,o,device='cpu');runner.policy(p,d,o,device='cpu',stop_after_updates=1)
+    p,d,o=fixture;runner.prepare(p,d,o);training.scorer(p,d,o,device='cpu');training.policy(p,d,o,device='cpu',stop_after_updates=1)
     path=o/'policy_latest.pt';s=torch.load(path,map_location='cpu',weights_only=False)
     if mutation=='identity':s['identity']='changed'
     elif mutation=='backend':s['device_type']='cuda'
@@ -175,12 +176,12 @@ def test_checkpoint_state_mismatch_rejected(fixture,mutation):
     elif mutation=='draws':s['state']['draws']+=1
     elif mutation=='schedule':s['schedule']['total_updates']=6
     torch.save(s,path)
-    with pytest.raises(ValueError,match='checkpoint'):runner.policy(p,d,o,device='cpu')
+    with pytest.raises(ValueError,match='checkpoint'):training.policy(p,d,o,device='cpu')
 
 def test_global_and_fixed_prior_keep_within_collector_ratios(fixture):
-    p,d,o=fixture;runner.prepare(p,d,o);runner.scorer(p,d,o,device='cpu');run,data=runner.open_run(p,d,o,0)
+    p,d,o=fixture;runner.prepare(p,d,o);training.scorer(p,d,o,device='cpu');run,data=runner.open_run(p,d,o,0)
     other=deepcopy(run);other['config']['weighting'].update(rule='global_softmax',collector_prior=None)
-    q0,e0=runner.probabilities(other,data,d,o);q1,e1=runner.probabilities(run,data,d,o)
+    q0,e0=training.probabilities(other,data,d,o);q1,e1=training.probabilities(run,data,d,o)
     assert e0['rule']=='global_softmax' and e1['rule']=='fixed_collector_prior'
     for c in('A','B','C'):
         ids=[i for i in range(6)if data['collectors'][i]==c]
@@ -191,7 +192,7 @@ def test_cached_scores_no_fit_exact_seed_only(fixture,monkeypatch):
     p,d,o=fixture;b=runner.read(d/'bundle.json');path=d/'scores.npz';a=dict(indices=np.arange(6,dtype=np.int64),scores=np.arange(6,dtype=np.float32));np.savez_compressed(path,**a)
     b['assets']['scores']=dict(path=path.name,sha256=runner.digest(path),arrays={k:dict(shape=list(v.shape),dtype=str(v.dtype))for k,v in a.items()});b['score_cache_seed']=0;(d/'bundle.json').write_text(json.dumps(b))
     runner.prepare(p,d,o);monkeypatch.setattr(models,'make_model',lambda*a,**k:pytest.fail('new scorer'))
-    assert runner.scorer(p,d,o,device='cpu')['new_scorer_updates']==0
+    assert training.scorer(p,d,o,device='cpu')['new_scorer_updates']==0
     with pytest.raises(ValueError,match='exact training seed'):runner.check(p,d,seed=1)
 
 class ToyAdapter:
@@ -234,7 +235,7 @@ def test_no_absolute_runner_or_codex_implementation_dependency():
 def test_same_output_flock_collision(fixture):
     p,d,o=fixture;runner.prepare(p,d,o);before=(o/'run.json').read_bytes()
     with runner.locked(o):
-        with pytest.raises(RuntimeError,match='already owned'):runner.policy(p,d,o,device='cpu')
+        with pytest.raises(RuntimeError,match='already owned'):training.policy(p,d,o,device='cpu')
     assert(o/'run.json').read_bytes()==before
 
 def test_cli_fixture_evaluate_and_resume_are_complete_pipeline(fixture,capsys):
@@ -267,7 +268,7 @@ def test_dry_run_deep_payload_units_without_nn_or_reset(fixture,mutation,monkeyp
 def test_sampler_chronology_exact_weighted_loader_base_seed_and_final_batch(fixture):
     from torch.utils.data import DataLoader,WeightedRandomSampler
     p,d,o=fixture;result=train(p,d,o)
-    run,data=runner.open_run(p,d,o,0);q,_=runner.probabilities(run,data,d,o)
+    run,data=runner.open_run(p,d,o,0);q,_=training.probabilities(run,data,d,o)
     generator=torch.Generator().manual_seed(77)
     expected_hash=[]
     for _ in range(2):
@@ -281,12 +282,12 @@ def test_native_numpy_scorer_and_sampler_resume_exact_fixture(fixture,tmp_path):
     p,d,full=fixture
     rewrite(p,lambda c:(c['scorer'].update(pair_order_rng='numpy_epoch_seed',full_context_batches=True),c['policy'].update(sampling_rng='numpy_choice_persistent',full_context_batches=True)))
     train(p,d,full);resumed=tmp_path/'numpy_resumed';runner.prepare(p,d,resumed)
-    runner.scorer(p,d,resumed,device='cpu',stop_after_updates=1);runner.scorer(p,d,resumed,device='cpu')
-    runner.policy(p,d,resumed,device='cpu',stop_after_updates=4);runner.policy(p,d,resumed,device='cpu')
+    training.scorer(p,d,resumed,device='cpu',stop_after_updates=1);training.scorer(p,d,resumed,device='cpu')
+    training.policy(p,d,resumed,device='cpu',stop_after_updates=4);training.policy(p,d,resumed,device='cpu')
     for filename in('scorer_latest.pt','policy_final.pt'):
         assert_same(torch.load(full/filename,map_location='cpu',weights_only=False),torch.load(resumed/filename,map_location='cpu',weights_only=False))
     final=torch.load(resumed/'policy_final.pt',map_location='cpu',weights_only=False)
-    run,data=runner.open_run(p,d,resumed,0);q,_=runner.probabilities(run,data,d,resumed)
+    run,data=runner.open_run(p,d,resumed,0);q,_=training.probabilities(run,data,d,resumed)
     gen=np.random.default_rng(77)
     for _ in range(2):gen.choice(6,7,replace=True,p=q.numpy())
     assert_same(final['numpy_sampler_state'],gen.bit_generator.state)
@@ -300,7 +301,7 @@ def test_full_context_scorer_vs_dynamic_policy_padding_and_kuairec_zero_users(fi
     p,d,o=fixture;run=runner.check(p,d);data=runner.load_data(run,d)
     run['config']['model']['user_features']='zero';run['config']['scorer']['full_context_batches']=True
     rows=[data['corpus'].get(1)]
-    scorer=runner.collate(rows,run,scorer=True);policy=runner.collate(rows,run)
+    scorer=training.collate(rows,run,scorer=True);policy=training.collate(rows,run)
     assert scorer['actions'].shape==(1,4) and policy['actions'].shape==(1,1)
     assert scorer['users'].tolist()==[0] and policy['users'].tolist()==[0]
     assert scorer['mask'].tolist()==[[True,False,False,False]]
@@ -347,8 +348,8 @@ def test_public_cumulative_targets_and_separate_feedback(tmp_path):
     assert data['corpus'].get(6).positive_count==2. # original count validation
     assert data['corpus'].get(0).feedback.tolist()==[4.,5.]
     assert data['policy_corpus'].get(0).feedback.tolist()==[3.,3.]
-    b=runner.collate([data['policy_corpus'].get(0)],run)
-    assert torch.allclose(runner.normalize(b,run['bundle']['units']['policy_training'])['feedback'],torch.full((1,2),.6))
+    b=training.collate([data['policy_corpus'].get(0)],run)
+    assert torch.allclose(normalize(b,run['bundle']['units']['policy_training'])['feedback'],torch.full((1,2),.6))
 
 @pytest.mark.parametrize('change', ['target','score','terminal','split','final'])
 def test_public_label_and_cohort_corruption_rejected(tmp_path,change):
@@ -369,11 +370,11 @@ def test_public_soft_label_loss_used_and_resume_exact(tmp_path,monkeypatch):
     monkeypatch.setattr(torch.nn.functional,'binary_cross_entropy_with_logits',loss)
     try:
         a,b=tmp_path/'full',tmp_path/'resumed';runner.prepare(p,d,a);runner.prepare(p,d,b)
-        runner.scorer(p,d,a,device='cpu');runner.scorer(p,d,b,device='cpu',stop_after_updates=1);runner.scorer(p,d,b,device='cpu')
+        training.scorer(p,d,a,device='cpu');training.scorer(p,d,b,device='cpu',stop_after_updates=1);training.scorer(p,d,b,device='cpu')
         assert set(observed)=={0.,.5,1.}
         sa=torch.load(a/'scorer_latest.pt',weights_only=False);sb=torch.load(b/'scorer_latest.pt',weights_only=False)
         assert_same(sa,sb)
-        runner.policy(p,d,a,device='cpu');runner.policy(p,d,b,device='cpu',stop_after_updates=1);runner.policy(p,d,b,device='cpu')
+        training.policy(p,d,a,device='cpu');training.policy(p,d,b,device='cpu',stop_after_updates=1);training.policy(p,d,b,device='cpu')
         assert_same(torch.load(a/'policy_final.pt',weights_only=False),torch.load(b/'policy_final.pt',weights_only=False))
         z=torch.zeros(3,requires_grad=True);original(z,torch.tensor([0.,.5,1.])).backward()
         assert z.grad[0]>0 and z.grad[1]==0 and z.grad[2]<0
@@ -420,7 +421,7 @@ def test_public_validation_rng_matches_native_source(tmp_path,dataset,draw):
     torch.manual_seed(936);initial=torch.get_rng_state().clone()
     if draw:torch.empty((),dtype=torch.int64).random_().item()
     expected=torch.get_rng_state().clone();torch.set_rng_state(initial)
-    metrics=runner._scorer_validation(run,data,model,torch.device('cpu'))
+    metrics=training._scorer_validation(run,data,model,torch.device('cpu'))
     assert torch.equal(torch.get_rng_state(),expected)
     assert metrics['validation_pairs']==2 and model.training
     assert_same(before,model.state_dict())
@@ -428,7 +429,7 @@ def test_public_validation_rng_matches_native_source(tmp_path,dataset,draw):
 def test_public_coat_softplus_targets_match_native_formula():
     z=torch.tensor([-3.,0.,5.],requires_grad=True);targets=torch.tensor([0.,.5,1.])
     expected=(targets*torch.nn.functional.softplus(-z)+(1-targets)*torch.nn.functional.softplus(z)).mean()
-    actual=runner._public_preference_loss(z,targets,'Coat')
+    actual=training._public_preference_loss(z,targets,'Coat')
     assert torch.equal(actual,expected)
     actual.backward();assert z.grad[0]>0 and z.grad[1]==0 and z.grad[2]<0
 
@@ -436,8 +437,8 @@ def test_public_randperm_scorer_resume_and_rng(tmp_path):
     p,d=make_public_fixture(tmp_path)
     rewrite(p,lambda c:c['scorer'].update(pair_order_rng='torch_randperm'))
     a,b=tmp_path/'full',tmp_path/'resumed';runner.prepare(p,d,a);runner.prepare(p,d,b)
-    runner.scorer(p,d,a,device='cpu');runner.scorer(p,d,b,device='cpu',stop_after_updates=1)
-    runner.scorer(p,d,b,device='cpu')
+    training.scorer(p,d,a,device='cpu');training.scorer(p,d,b,device='cpu',stop_after_updates=1)
+    training.scorer(p,d,b,device='cpu')
     ca=torch.load(a/'scorer_latest.pt',weights_only=False);cb=torch.load(b/'scorer_latest.pt',weights_only=False)
     assert_same(ca,cb)
     gen=torch.Generator().manual_seed(0)
@@ -614,12 +615,12 @@ def test_retained_catalog_profiles_fit_resume_and_evaluate(fixture, tmp_path, na
     complete = tmp_path / "complete"
     for path in (complete, output):
         assert runner.prepare(profile, root, path)["policy_updates"] == 6
-    runner.scorer(profile, root, complete, device="cpu")
-    assert runner.scorer(profile, root, output, device="cpu", stop_after_updates=1)["updates"] == 1
-    runner.scorer(profile, root, output, device="cpu")
-    runner.policy(profile, root, complete, device="cpu")
-    assert runner.policy(profile, root, output, device="cpu", stop_after_updates=1)["updates"] == 1
-    policy = runner.policy(profile, root, output, device="cpu")
+    training.scorer(profile, root, complete, device="cpu")
+    assert training.scorer(profile, root, output, device="cpu", stop_after_updates=1)["updates"] == 1
+    training.scorer(profile, root, output, device="cpu")
+    training.policy(profile, root, complete, device="cpu")
+    assert training.policy(profile, root, output, device="cpu", stop_after_updates=1)["updates"] == 1
+    policy = training.policy(profile, root, output, device="cpu")
     assert policy["optimizer_updates"] == 6 and policy["trajectory_draws"] == 14
     for checkpoint in ("scorer_latest.pt", "policy_final.pt"):
         assert_same(torch.load(complete / checkpoint, weights_only=False),
@@ -649,5 +650,22 @@ def test_initial_release_checkpoint_binding_rejects_changed_sources(fixture):
     assert bound["config"]["model"]["user_features"] == "zero"
     assert bound["initial_release_config"] == previous["config"]
     previous["implementation_sha256"]["plain.py"] = "changed"
+    with pytest.raises(ValueError, match="identity collision"):
+        runner._bound_run(current, previous)
+
+
+def test_previous_environment_layout_binding_preserves_checkpoint_identity(fixture):
+    profile, root, _ = fixture
+    configure_catalog_fixture(profile, root, "coat", "coat_native_v1", 7, 6)
+    current = runner.check(profile, root)
+    previous = deepcopy(current)
+    previous["implementation_sha256"] = {
+        name: runner._PRE_MOVE_SOURCES[name] for name in (
+            "runner.py", "environments.py", "data.py", "models.py", "training.py", "objective.py")
+    }
+    previous.pop("identity")
+    previous["identity"] = runner.identity(previous)
+    assert runner._bound_run(current, previous)["identity"] == previous["identity"]
+    previous["seed"] += 1
     with pytest.raises(ValueError, match="identity collision"):
         runner._bound_run(current, previous)

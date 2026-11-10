@@ -1,8 +1,6 @@
-"""Continuous VirtualTB recipe for the shared PrDT launcher."""
-
+"""VirtualTB corpus, preference pairs, and bundle conversion."""
 from collections import defaultdict
 import argparse
-from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import math
@@ -11,12 +9,12 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from . import runner
-from .continuous import per_trajectory_continuous_nll
-from .models import make_model
-from .objective import bradley_terry_target_loss
-from .training import _restore_rng_state, _rng_state, choose_device
-from .virtualtb_native import load_environment, profile_digest, reset_seed
+from .. import runner
+from .bundles import load_asset
+
+
+def profile_digest(profile):
+    return hashlib.sha256(np.ascontiguousarray(profile, dtype=np.float32).tobytes()).hexdigest()
 
 
 def validate_config(config):
@@ -132,21 +130,21 @@ def check(profile, root, seed):
         path = runner.relative(root, asset["path"])
         if set(asset) != {"path", "sha256", "arrays"} or runner.digest(path) != asset["sha256"]:
             raise ValueError(f"missing or changed VirtualTB asset: {name}")
-    implementation = ("virtualtb.py", "virtualtb_native.py", "continuous.py", "models.py",
+    implementation = ("data/bundles.py", "data/virtualtb.py", "environments/virtualtb.py",
+                      "environments/virtualtb_native.py", "continuous.py", "models.py",
                       "runner.py", "training.py", "objective.py")
     run = dict(version=runner.VERSION, config=config, bundle=bundle, seed=seed,
                bundle_sha256=runner.digest(manifest),
-               implementation_sha256={name: runner.digest(Path(__file__).with_name(name))
-                                      for name in implementation})
+               implementation_sha256=runner._implementation_hashes(implementation))
     run["identity"] = runner.identity(run)
     return run
 
 
 def load_data(run, root):
     config, bundle = run["config"], run["bundle"]
-    corpus = runner.load_asset(root, bundle, "corpus")
-    pairs = runner.load_asset(root, bundle, "pairs")
-    cases = runner.load_asset(root, bundle, "dev_cases")
+    corpus = load_asset(root, bundle, "corpus")
+    pairs = load_asset(root, bundle, "pairs")
+    cases = load_asset(root, bundle, "dev_cases")
     train_n = config["data"]["split_counts"]["train"]
     n = train_n + config["data"]["split_counts"]["validation"]
     shapes = {"observations": (n, 30, 91), "actions": (n, 30, 27),
@@ -203,240 +201,6 @@ def load_data(run, root):
     return result, cases
 
 
-def scorer_schedule(seed, scorer, ids, first, second):
-    if seed == 0:
-        order = sorted(range(len(first)), key=lambda i: rank_pair(
-            scorer["exposure_digest_domain"], str(ids[first[i]]), str(ids[second[i]])))
-        order = np.asarray(order, dtype=np.int64)
-    else:
-        order = np.random.default_rng(scorer["pair_order_seed_offset"] + seed).permutation(len(first))
-    return order[:scorer["pair_draws"]].reshape(scorer["updates"], scorer["batch_size"])
-
-
-def policy_schedule(seed, policy, n):
-    permutation = np.random.default_rng(policy["sampler_seed_offset"] + seed).permutation(n)
-    draws = policy["draws_per_epoch"]
-    return np.stack([permutation[(np.arange(draws) + block * draws) % n]
-                     for block in range(policy["epochs"])])
-
-
-def pair_scores(model, corpus, pairs, indices, device):
-    first, second, targets = (array[indices] for array in pairs)
-    scores = model(*corpus.batch(np.concatenate((first, second)), device))
-    return scores[:len(first)], scores[len(first):], torch.from_numpy(targets).to(device)
-
-
-def validation_loss(model, corpus, pairs, device, batch_size):
-    model.eval()
-    count, total = len(pairs[0]), 0.0
-    with torch.no_grad():
-        for offset in range(0, count, batch_size):
-            batch = slice(offset, offset + batch_size)
-            loss = bradley_terry_target_loss(*pair_scores(model, corpus, pairs, batch, device))
-            total += float(loss) * len(pairs[0][batch])
-    return total / count
-
-
-def train(run, data, output, stage, device_name, stop_after_updates=None):
-    config, seed = run["config"], run["seed"]
-    device, values = choose_device(device_name), config[stage]
-    path = output / f"{stage}.pt"
-    torch.manual_seed(seed)
-    model = make_model(config, device, scorer=stage == "scorer")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=values["learning_rate"],
-                                  weight_decay=values["weight_decay"])
-    scheduler = (None if stage == "scorer" else torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=values["cosine_horizon_updates"], eta_min=values["minimum_learning_rate"]))
-    generator = torch.Generator(device="cpu")
-    state = dict(identity=run["identity"], device=str(device), stage=stage, updates=0, draws=0,
-                 tokens=0, best=None, best_loss=math.inf, best_update=None, validation_history=[])
-    if path.exists():
-        state = torch.load(path, map_location="cpu", weights_only=False)
-        if (state["identity"], state["device"], state["stage"]) != (run["identity"], str(device), stage):
-            raise ValueError("VirtualTB checkpoint does not match this run and device")
-        model.load_state_dict(state["model"])
-        optimizer.load_state_dict(state["optimizer"])
-        if scheduler is not None:
-            scheduler.load_state_dict(state["scheduler"])
-        _restore_rng_state(state["rng"], generator)
-        model.train(state["model_training"])
-
-    corpus, pairs = data["train"]
-    n = len(corpus.episode_ids)
-    if stage == "scorer":
-        schedule = scorer_schedule(seed, values, corpus.episode_ids, *pairs[:2])
-    else:
-        frozen = torch.load(output / "scores.pt", map_location="cpu", weights_only=True)
-        if (frozen["identity"] != run["identity"] or frozen["weights"].shape != (n,)
-                or not torch.isfinite(frozen["weights"]).all()):
-            raise ValueError("VirtualTB weights do not match this run")
-        weights = frozen["weights"]
-        schedule = [block[i:i + values["batch_size"]]
-                    for block in policy_schedule(seed, values, n)
-                    for i in range(0, len(block), values["batch_size"])]
-
-    def checkpoint():
-        runner.save(path, {**state, "model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                          "rng": _rng_state(generator), "model_training": model.training,
-                          "scheduler": scheduler.state_dict() if scheduler else None})
-
-    cap = values["updates"] if stop_after_updates is None else min(values["updates"], stop_after_updates)
-    for offset in range(state["updates"], cap):
-        batch = schedule[offset]
-        if stage == "scorer":
-            left, right, targets = pair_scores(model, corpus, pairs, batch, device)
-            loss = (bradley_terry_target_loss(left, right, targets)
-                    + values["lambda_score"] * .5 * (left.square().mean() + right.square().mean()))
-        else:
-            obs, actions, _, mask = corpus.batch(batch, device)
-            nll = per_trajectory_continuous_nll(model(obs, actions, mask), actions, mask)
-            batch_weights = weights.index_select(0, torch.from_numpy(batch)).to(device=device, dtype=nll.dtype)
-            loss = (n * batch_weights * nll).mean()
-            state["tokens"] += int(mask.sum())
-        if not torch.isfinite(loss):
-            raise FloatingPointError(f"nonfinite VirtualTB {stage} loss")
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), values["gradient_clip"])
-        if not torch.isfinite(grad_norm):
-            raise FloatingPointError(f"nonfinite VirtualTB {stage} gradient")
-        optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
-        state["updates"] = offset + 1
-        state["draws"] += len(batch)
-        boundary = state["updates"] % values["checkpoint_interval_updates"] == 0
-        if stage == "scorer" and boundary:
-            # The retained scorer stays in evaluation mode after its first
-            # offline validation; subsequent updates retain disabled dropout.
-            val = validation_loss(model, *data["validation"], device, values["validation_batch_size"])
-            if not math.isfinite(val):
-                raise FloatingPointError("nonfinite VirtualTB offline validation loss")
-            state["validation_history"].append({"update": offset + 1, "loss": val})
-            if val < state["best_loss"]:
-                state["best_loss"], state["best_update"] = val, offset + 1
-                state["best"] = deepcopy({key: tensor.detach().cpu() for key, tensor in model.state_dict().items()})
-        if boundary or state["updates"] == cap:
-            checkpoint()
-    complete = state["updates"] == values["updates"]
-    summary = dict(status="complete" if complete else "paused", updates=state["updates"],
-                   draws=state["draws"], valid_action_tokens=state["tokens"])
-    if complete and stage == "scorer":
-        model.load_state_dict(state["best"])
-        model.eval()
-        scores = []
-        with torch.no_grad():
-            for start in range(0, n, 256):
-                ids = np.arange(start, min(start + 256, n))
-                scores.append(model(*corpus.batch(ids, device)).cpu())
-        scores = torch.cat(scores).double()
-        if not torch.isfinite(scores).all():
-            raise FloatingPointError("nonfinite VirtualTB frozen scorer output")
-        weights = torch.softmax(config["weighting"]["beta"] * (scores - scores.max()), dim=0)
-        runner.save(output / "scores.pt", {"identity": run["identity"], "scores": scores, "weights": weights})
-        summary.update(best_update=state["best_update"], validation_history=state["validation_history"])
-    runner.put(output / f"{stage}.json", summary)
-    return summary
-
-
-def rollout(environment, model, profile, seed, device):
-    observation = environment.reset(profile, seed)
-    observations, actions, rewards = [], [], []
-    terminated = truncated = False
-    while not (terminated or truncated):
-        observations.append(np.asarray(observation, dtype=np.float32).copy())
-        length = len(observations)
-        action_history = np.zeros((length, 27), dtype=np.float32)
-        if actions:
-            action_history[:length - 1] = np.stack(actions)
-        obs = torch.from_numpy(np.stack(observations)).unsqueeze(0).to(device)
-        act = torch.from_numpy(action_history).unsqueeze(0).to(device)
-        mask = torch.ones(1, length, dtype=torch.bool, device=device)
-        with torch.no_grad():
-            action = model(obs, act, mask).mean[0, -1].cpu().numpy().astype(np.float32)
-        actions.append(action.copy())
-        observation, reward, terminated, truncated = environment.step(action)
-        rewards.append(reward)
-    return dict(actions=np.asarray(actions).tolist(), rewards=rewards, length=len(rewards),
-                return_raw_clicks=float(sum(rewards)), terminated=terminated, truncated=truncated)
-
-
-def evaluate(run, cases, output, device_name, simulator_root, environment_factory):
-    config = run["config"]
-    policy_path = output / "policy.pt"
-    rows_path = output / "development_episodes.json"
-    result_path = output / "evaluation.json"
-    attempt = output / "evaluation_attempt.json"
-    binding = dict(identity=run["identity"], policy_sha256=runner.digest(policy_path))
-    if result_path.exists():
-        result = runner.read(result_path)
-        if (any(result.get(key) != value for key, value in binding.items())
-                or result.get("raw_sha256") != runner.digest(rows_path)):
-            raise ValueError("completed VirtualTB development evidence changed")
-        return result
-    if attempt.exists():
-        raise ValueError("partial VirtualTB development evaluation exists; use a fresh output for a new run")
-    device = choose_device(device_name)
-    state = torch.load(policy_path, map_location="cpu", weights_only=False)
-    if state["identity"] != run["identity"] or state["updates"] != config["policy"]["updates"]:
-        raise ValueError("VirtualTB evaluation requires the complete policy checkpoint for this run")
-    model = make_model(config, device)
-    model.load_state_dict(state["model"])
-    model.eval()
-    environment = environment_factory(simulator_root)
-    runner.put(attempt, binding, immutable=True)
-    rows = []
-    domain = config["evaluation"]["reset_seed_domain"]
-    for ordinal, (profile, digest) in enumerate(zip(cases["profiles"], cases["profile_sha256"])):
-        seed = reset_seed(domain, str(digest))
-        row = rollout(environment, model, profile, seed, device)
-        rows.append(dict(row, profile_ordinal=ordinal, profile_sha256=str(digest), environment_seed=seed))
-    returns = np.asarray([r["return_raw_clicks"] for r in rows], dtype=np.float64)
-    lengths = np.asarray([r["length"] for r in rows], dtype=np.float64)
-    pooled = float(returns.sum() / lengths.sum())
-    result = dict(status="complete", episodes=len(rows), pages=int(lengths.sum()),
-                  mean_cumulative_raw_clicks=float(returns.mean()), pooled_clicks_per_page=pooled,
-                  mean_pages=float(lengths.mean()), CTR=pooled / 10.0,
-                  natural_terminations=sum(r["terminated"] for r in rows),
-                  h30_truncations=sum(r["truncated"] for r in rows), final_rollouts=0)
-    runner.put(rows_path, rows, immutable=True)
-    result.update(binding, raw_sha256=runner.digest(rows_path))
-    runner.put(result_path, result, immutable=True)
-    return result
-
-
-def dispatch(stage, profile, data_root, output_root=None, *, seed=0, device="auto", through="policy",
-             dry_run=False, simulator_root=None, stop_after_updates=None, environment_factory=load_environment):
-    run = check(profile, data_root, seed)
-    data, cases = load_data(run, data_root)
-    if stage == "check" or dry_run:
-        return dict(status="preflight_pass", profile="virtualtb", identity=run["identity"],
-                    writes=False, models_constructed=False, payload_validated=True,
-                    native_environment_reset_or_step=False)
-    if output_root is None:
-        raise ValueError("--output-root is required")
-    output = Path(output_root)
-    with runner.locked(output):
-        binding = output / "run.json"
-        if stage == "prepare":
-            if not binding.exists() and any(path.name != runner.LOCK_NAME for path in output.iterdir()):
-                raise ValueError("foreign nonempty output directory")
-            runner.put(binding, run, immutable=True)
-            return dict(status="prepared", identity=run["identity"], profile="virtualtb")
-        if not binding.exists() or runner.read(binding) != run:
-            raise ValueError("run is unprepared or its VirtualTB inputs changed")
-        if stage == "resume":
-            result = train(run, data, output, "scorer", device)
-            if through in {"policy", "evaluate"}:
-                result = train(run, data, output, "policy", device)
-            if through == "evaluate":
-                result = evaluate(run, cases, output, device, simulator_root, environment_factory)
-            return result
-        if stage == "evaluate":
-            return evaluate(run, cases, output, device, simulator_root, environment_factory)
-        return train(run, data, output, stage, device, stop_after_updates)
-
-
 def export_bundle(train_path, validation_path, development_path, output, config_path=None):
     """Convert prepared native artifacts without copying FINAL or collector state."""
     config = runner.dataset_settings(config_path)["virtualtb"]
@@ -479,7 +243,11 @@ def export_bundle(train_path, validation_path, development_path, output, config_
         sealed_final_users=config["evaluation"].get("sealed_final_users", 671))
     runner.put(output / "bundle.json", bundle)
     profile = f"{config_path}#virtualtb" if config_path else "virtualtb"
-    return dispatch("check", profile, output)
+    run = check(profile, output, seed=0)
+    load_data(run, output)
+    return dict(status="preflight_pass", profile="virtualtb", identity=run["identity"],
+                writes=False, models_constructed=False, payload_validated=True,
+                native_environment_reset_or_step=False)
 
 
 def main():

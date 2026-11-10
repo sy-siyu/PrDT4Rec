@@ -1,20 +1,12 @@
-"""Native FreeB transition adapters for catalog development evaluation.
+"""Shared catalog transition adapters for native FreeB development evaluation.
 
 Small source-equivalent adapters: ML distance75/window7; Coat distance6/window7;
 Kuai category count>1/window9. Literal negative Python slices and terminal rewards are intentional.
 The case table supplies retained native reset states; no corpus or feature fit.
 """
 from collections import Counter
-from pathlib import Path
 import numpy as np
-
-
-def _asset(bundle, root, key):
-    path = (Path(root) / bundle['assets'][key]['path']).resolve()
-    if not path.is_relative_to(Path(root).resolve()):
-        raise ValueError('environment asset escapes data root')
-    with np.load(path, allow_pickle=False) as z:
-        return {k: z[k].copy() for k in z.files}
+from ..data.bundles import load_environment_asset as _asset
 
 
 class MatrixDEV:
