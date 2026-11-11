@@ -4,6 +4,8 @@ PrDT4Rec is an offline recommendation method that learns from preferences betwee
 
 This repository provides model implementations, dataset configurations, data preparation tools, and training and evaluation commands for MovieLens, KuaiRec, Coat, YahooR3, KuaiRand, and VirtualTB.
 
+![Figure 1. PrDT4Rec fits a trajectory scorer to within-user episode pairs, then uses its frozen scores to weight policy training on the same offline corpus.](docs/assets/prdt4rec-figure-1.png)
+
 ## Install
 
 Use Python 3.11 or later and install a PyTorch build appropriate for your hardware.
@@ -13,6 +15,8 @@ python -m pip install -e '.[dev]'
 python -m prdt4rec list
 python -m pytest
 ```
+
+For upstream benchmark environment and dataset setup, see the [EasyRL4Rec repository and setup instructions](https://github.com/chongminggao/EasyRL4Rec).
 
 ## Configuration
 
