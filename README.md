@@ -1,6 +1,8 @@
 # PrDT4Rec
 
-PrDT4Rec is an offline recommendation method that learns from preferences between logged trajectories. It first trains a Bradley–Terry scorer on trajectory pairs, then converts the frozen scores into trajectory weights for training a Decision ConvFormer policy. The inverse-temperature parameter β controls how strongly training emphasizes higher-scoring trajectories.
+Implementation of *Trajectory-Reweighted Offline Reinforcement Learning for Preference-Aligned Recommendations*.
+
+PrDT4Rec learns a recommendation policy from fixed offline trajectories. It fits a Bradley–Terry scorer to within-user session comparisons ordered by implicit-feedback aggregates. A global softmax converts the frozen scores into weights for autoregressive imitation. The causal Decision ConvFormer policy predicts actions from the interaction history. Here, preference alignment refers to using the proxy-derived session ordering to guide policy training. The inverse temperature β controls how strongly training emphasizes higher-scoring trajectories.
 
 This repository provides model implementations, dataset configurations, data preparation tools, and training and evaluation commands for MovieLens, KuaiRec, Coat, YahooR3, KuaiRand, and VirtualTB.
 
