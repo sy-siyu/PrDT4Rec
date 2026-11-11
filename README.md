@@ -1,6 +1,8 @@
 # PrDT4Rec
 
-Trajectory-reweighted offline learning for preference-guided recommendation. A Bradley–Terry scorer supplies frozen trajectory weights for a Decision ConvFormer policy.
+PrDT4Rec is an offline recommendation method that learns from preferences between logged trajectories. It first trains a Bradley–Terry scorer on trajectory pairs, then converts the frozen scores into trajectory weights for training a Decision ConvFormer policy. The inverse-temperature parameter β controls how strongly training emphasizes higher-scoring trajectories.
+
+This repository provides model implementations, dataset configurations, data preparation tools, and training and evaluation commands for MovieLens, KuaiRec, Coat, YahooR3, KuaiRand, and VirtualTB.
 
 ## Install
 
